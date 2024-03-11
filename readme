@@ -1,1 +1,13 @@
-This is the project of DSGE.
+This is the project of DSGE, which replicate the results of the paper: Differentiable State-Space Models and Hamiltonian Monte Carlo Estimation, David Childers,
+Jesus Fernandez-Villaverde, etc.
+
+There are three pdf files and 1 code folder.
+1. Proposal.pdf describe the motivation and workflow of this work.
+2. Report.pdf consists of the replication results and question answering to the interview questions.
+3. DSGE in a Nutshell is a notes to help student to understand DSGE model and handle the basic solution method.
+
+The code folder has three sub folders: 
+1. src: contain all of the main code.
+2. tests: contain all of the test code.
+3. data: contain the data we used for inference.
+
