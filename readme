@@ -1,5 +1,4 @@
-This is the project of DSGE, which replicate the results of the paper: Differentiable State-Space Models and Hamiltonian Monte Carlo Estimation, David Childers,
-Jesus Fernandez-Villaverde, etc.
+This is the project of DSGE, which replicate the results of the paper: Differentiable State-Space Models and Hamiltonian Monte Carlo Estimation, David Childers, Jesus Fernandez-Villaverde, etc.
 
 There are three pdf files and 1 code folder.
 1. Proposal.pdf describe the motivation and workflow of this work.
