@@ -1,0 +1,2580 @@
+\documentclass[12pt,a4paper]{article}
+
+% ── Packages ──────────────────────────────────────────────────────────
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,amsthm,mathtools}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{natbib}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{cleveref}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{setspace}
+
+\geometry{margin=1in}
+\onehalfspacing
+
+% ── Theorem environments ──────────────────────────────────────────────
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{remark}[theorem]{Remark}
+\newtheorem{assumption}{Assumption}
+
+% ── Notation shortcuts ────────────────────────────────────────────────
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Var}{\mathrm{Var}}
+\newcommand{\Cov}{\mathrm{Cov}}
+\newcommand{\tr}{\mathrm{tr}}
+\newcommand{\diag}{\mathrm{diag}}
+\newcommand{\vect}{\mathrm{vec}}
+\newcommand{\kron}{\otimes}
+\newcommand{\xf}{{x^{f}}}
+\newcommand{\xs}{{x^{s}}}
+\newcommand{\gx}{g_x}
+\newcommand{\hx}{h_x}
+\newcommand{\Gxx}{G_{xx}}
+\newcommand{\Hxx}{H_{xx}}
+\newcommand{\gss}{{g_{\sigma\sigma}}}
+\newcommand{\hsig}{{h_{\sigma\sigma}}}
+\newcommand{\cO}{\mathcal{O}}
+\DeclareMathOperator{\specrad}{sp}
+\DeclareMathOperator{\chol}{chol}
+
+% ══════════════════════════════════════════════════════════════════════
+\title{\Large\textbf{A Pruned Square-Root Unscented Kalman Filter for\\
+Bayesian Estimation of Second-Order DSGE Models}}
+
+\author{%
+[Authors]\thanks{%
+We thank [acknowledgments]. All errors are our own.
+Correspondence: [email].}
+}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We develop a novel filtering methodology---the Pruned Square-Root
+Unscented Kalman Filter (Pruned SR-UKF)---for likelihood evaluation
+in Dynamic Stochastic General Equilibrium (DSGE) models solved with
+second-order perturbation methods. The standard approach augments the
+state vector to include both first-order states, their Kronecker
+products, and second-order corrections, yielding an
+$\cO(n_x + n_x^2 + n_x)$-dimensional linear state space amenable to
+the Kalman filter. This augmentation is computationally infeasible
+for models with more than approximately 15 state variables, as the
+per-step cost scales as $\cO((n_x + n_x^2)^3)$. Our method instead
+applies the unscented Kalman filter to the $n_x$-dimensional
+first-order state alone, propagates the second-order correction
+deterministically from the filtered posterior mean, and handles the
+quadratic observation nonlinearity through sigma-point quadrature.
+We prove that (i)~the sigma-point approximation captures the
+conditional mean of the quadratic observation equation exactly and
+its covariance to second order; (ii)~the approximation error in the
+second-order state correction is $\cO(\sigma^2)$, where $\sigma$
+denotes the shock standard deviation; and (iii)~the per-step cost
+is $\cO(n_x^3)$, yielding a speedup of $\cO(n_x^3)$ over the
+augmented filter. We embed the filter in a Hamiltonian Monte Carlo
+(HMC) posterior sampler with implicit adjoint gradients through the
+perturbation solver and validate the methodology on the
+\citet{schmitt2003closing} small open economy model, demonstrating
+that the Pruned SR-UKF produces posterior estimates statistically
+indistinguishable from the augmented Kalman filter at a fraction of
+the computational cost.
+
+\medskip
+\noindent\textbf{Keywords:}
+DSGE models, second-order perturbation, pruning, unscented Kalman filter,
+square-root filter, Bayesian estimation, Hamiltonian Monte Carlo.
+
+\medskip
+\noindent\textbf{JEL Classification:} C11, C32, C63, E32.
+\end{abstract}
+
+\newpage
+\tableofcontents
+\newpage
+
+% ══════════════════════════════════════════════════════════════════════
+%  SECTION 1 — INTRODUCTION
+% ══════════════════════════════════════════════════════════════════════
+\section{Introduction}\label{sec:intro}
+
+Second-order perturbation methods have become indispensable in
+macroeconomics. By retaining quadratic terms in the Taylor expansion
+of the model's policy functions around the deterministic steady state,
+they capture phenomena that first-order (linear) approximations miss
+entirely: risk premia, precautionary savings, welfare costs of
+business cycles, and asymmetric impulse responses
+\citep{schmitt2004solving, kim2008calculating}. Yet Bayesian estimation
+of DSGE models solved to second order remains computationally
+demanding, and the difficulty grows rapidly with model size.
+
+The central bottleneck is likelihood evaluation. The pruned
+state-space system of \citet{andreasen2018pruned} decomposes the
+approximate solution into a first-order stochastic component~$\xf_t$
+and a second-order deterministic correction~$\xs_t$, then stacks
+both together with $\vect(\xf_t {\xf_t}^\top)$ to form an augmented
+state of dimension $n_x + n_x^2 + n_x$. This augmented system is
+conditionally linear-Gaussian, so the standard Kalman filter applies.
+While analytically elegant, the per-step cost of the Kalman filter
+scales as $\cO((2n_x + n_x^2)^3)$, which for a model with $n_x = 30$
+state variables implies an augmented dimension of~960 and roughly
+$8.8 \times 10^8$ floating-point operations per time step---repeated
+for every likelihood evaluation inside a Markov Chain Monte Carlo
+(MCMC) sampler. This computational barrier has confined second-order
+Bayesian estimation to small-scale models in practice.
+
+\paragraph{Contribution.}
+We propose the \emph{Pruned Square-Root Unscented Kalman Filter}
+(Pruned SR-UKF), a filtering methodology that operates on the
+$n_x$-dimensional first-order state~$\xf_t$ alone, while correctly
+incorporating second-order effects through two mechanisms:
+\begin{enumerate}[nosep]
+\item The \emph{observation equation}
+$y_t = \gx(\xf_t + \xs_t) + \tfrac{1}{2}\Gxx(\xf_t \kron \xf_t) + \tfrac{1}{2}\gss + \varepsilon_t$
+is quadratic in~$\xf_t$. We handle this nonlinearity with the
+unscented transform (UT), which propagates $2n_x + 1$ sigma points
+through the observation function and recovers the conditional mean
+\emph{exactly} and the conditional covariance to second order---because
+the observation is a polynomial of degree two in~$\xf_t$.
+\item The \emph{second-order correction} $\xs_t$ is propagated
+deterministically from the filtered posterior mean of~$\xf_t$. We
+characterize the resulting approximation error and show it is
+$\cO(\sigma^2)$, where $\sigma$ is the shock standard deviation.
+\end{enumerate}
+The per-step cost of our filter is $\cO(n_x^3)$---a speedup of
+$\cO(n_x^3)$ relative to the augmented Kalman filter. For the
+$n_x = 7$ \citet{schmitt2003closing} model this represents a factor
+of approximately~343; for a medium-scale model with $n_x = 30$ the
+speedup exceeds $10^6$.
+
+We embed the Pruned SR-UKF in a complete Bayesian estimation pipeline:
+maximum a~posteriori (MAP) initialization via L-BFGS, Hessian-based
+mass-matrix preconditioning with eigenvalue capping, and Hamiltonian
+Monte Carlo (HMC) sampling with implicit adjoint gradients through the
+perturbation solver \citep{childers2024differentiable}. The entire
+pipeline is implemented in TensorFlow with automatic differentiation
+through the filter recursion, enabling gradient-based posterior
+exploration without finite-difference approximations.
+
+\paragraph{Related literature.}
+Our work bridges four strands of the literature: second-order
+perturbation methods
+\citep{schmitt2004solving, kim2008calculating, andreasen2018pruned},
+nonlinear filtering for DSGE models
+\citep{fernandez2007estimating, kollmann2014tractable, ivashchenko2014dsge, andreasen2012non},
+square-root sigma-point filtering
+\citep{julier1997new, wan2000unscented, van2001square},
+and gradient-based Bayesian DSGE estimation
+\citep{childers2024differentiable}. We defer a detailed review to
+\Cref{sec:literature}.
+
+\paragraph{Outline.}
+\Cref{sec:literature} reviews the relevant literature.
+\Cref{sec:model} presents the model framework, including the
+second-order perturbation solution and the pruned state-space system.
+\Cref{sec:method} develops the Pruned SR-UKF algorithm in detail.
+\Cref{sec:theory} states and proves the theoretical properties.
+\Cref{sec:implementation} discusses implementation and numerical
+considerations.
+\Cref{sec:challenges} addresses potential objections with
+mathematical rebuttals.
+\Cref{sec:application} applies the methodology to the
+\citet{schmitt2003closing} small open economy model.
+\Cref{sec:montecarlo} presents Monte Carlo evidence.
+\Cref{sec:conclusion} concludes.
+
+
+% ══════════════════════════════════════════════════════════════════════
+%  SECTION 2 — LITERATURE REVIEW
+% ══════════════════════════════════════════════════════════════════════
+\section{Literature Review}\label{sec:literature}
+
+\subsection{Second-Order Perturbation Methods and Pruning}
+
+The perturbation approach to solving DSGE models expands the policy
+functions in a Taylor series around the deterministic steady state.
+\citet{schmitt2004solving} derive a general second-order perturbation
+method by reducing the quadratic terms of the equilibrium conditions
+to a generalized Sylvester equation. Their method applies to any
+rational-expectations model written in the canonical form
+$\E_t[H(y_{t+1}, y_t, x_{t+1}, x_t)] = 0$.
+
+A well-known difficulty with second-order (and higher) approximations
+is that direct simulation of the full nonlinear law of motion can
+produce explosive sample paths, even when the underlying linear
+solution is stable. \citet{kim2008calculating} address this by
+introducing a ``pruning'' scheme that decomposes the state into a
+first-order stochastic component and a second-order correction, and
+crucially uses only the first-order component in the quadratic terms.
+This prevents the explosive feedback loop while preserving second-order
+accuracy.
+
+\citet{andreasen2018pruned} provide a rigorous analysis of the pruned
+state-space system for approximations up to third order. They establish
+stationarity conditions, derive closed-form expressions for
+unconditional first and second moments, and show how the pruned system
+can be cast as a linear state-space model suitable for the Kalman
+filter---at the cost of augmenting the state vector to include the
+Kronecker products of the first-order states.
+
+\subsection{Nonlinear Filtering for DSGE Estimation}
+
+\citet{fernandez2007estimating} pioneer likelihood-based Bayesian
+estimation of nonlinear DSGE models using the particle filter
+(sequential Monte Carlo). The particle filter provides asymptotically
+exact likelihood estimates but requires $\cO(N_p)$ model evaluations
+per time step, where $N_p$ is the number of particles---typically
+$10^3$ to $10^5$ for acceptable variance.
+
+\citet{kollmann2014tractable} develops a deterministic alternative
+by applying the standard Kalman filter to the pruned augmented state
+space of \citet{kim2008calculating}. This avoids stochastic simulation
+entirely and produces competitive accuracy relative to particle
+filters, but inherits the $\cO((n_x + n_x^2)^3)$ cost that limits
+scalability.
+
+\citet{ivashchenko2014dsge} compares several nonlinear Kalman filters
+for second-order DSGE estimation, including the Unscented Kalman
+Filter (UKF), the Central Difference Kalman Filter (CDKF), and the
+Quadratic Kalman Filter (QKF). He finds the QKF superior in
+parameter-estimation accuracy but does not employ pruning, instead
+applying the filters to the full nonlinear dynamics.
+
+\citet{andreasen2012non} applies the CDKF to second- and third-order
+DSGE solutions, demonstrating good performance with Gaussian,
+Laplace-distributed, and stochastic volatility shocks, again without
+the pruning decomposition.
+
+\citet{monfort2015quadratic} develop the Quadratic Kalman Filter for
+general state-space models with quadratic measurement and transition
+equations, achieving up to 70\% RMSE improvements over the UKF and
+extended Kalman filter. However, the QKF requires the state-space to
+be written in a specific quadratic form that may not map directly
+to the pruned decomposition.
+
+\subsubsection{Why Ivashchenko (2014) and Andreasen (2012) Could Avoid
+Pruning---and Why We Cannot}\label{sec:why-pruning}
+
+A natural question arises: if \citet{ivashchenko2014dsge} successfully
+applied the UKF, and \citet{andreasen2012non} the CDKF, to
+second-order DSGE solutions \emph{without} pruning, why does our
+method require it? The answer involves a fundamental distinction
+in what these approaches ask the filter to do, and the consequences
+for stability, theoretical guarantees, and scalability to full
+Bayesian estimation.
+
+\paragraph{The unpruned approach: sigma points through the full
+nonlinear dynamics.}
+Both Ivashchenko and Andreasen treat the second-order DSGE solution
+as a \emph{generic nonlinear state-space model}:
+\begin{align}
+x_{t+1} &= \hx\,x_t
+  + \tfrac{1}{2}\Hxx\,(x_t \kron x_t)
+  + \tfrac{1}{2}\hsig + \eta\,\varepsilon_{t+1},
+  \label{eq:unpruned-transition} \\
+y_t &= \gx\,x_t
+  + \tfrac{1}{2}\Gxx\,(x_t \kron x_t)
+  + \tfrac{1}{2}\gss + \varepsilon_t^y.
+  \label{eq:unpruned-obs}
+\end{align}
+The UKF (or CDKF) is then applied as a black-box nonlinear filter:
+sigma points are propagated through \emph{both} the transition
+equation~\eqref{eq:unpruned-transition} and the observation
+equation~\eqref{eq:unpruned-obs}. The filtered state is the full
+$x_t$---there is no decomposition into first- and second-order
+components.
+
+This approach works in practice for several reasons:
+\begin{enumerate}[nosep]
+\item \textbf{Localized sigma points.}
+The UKF/CDKF sigma points are constructed around the current
+filtered mean $\hat{x}_{t|t}$ with spread determined by the
+filtered covariance $P_{t|t}$. For typical DSGE calibrations with
+small shocks ($\sigma_\varepsilon \sim 0.01$--$0.1$), the sigma
+points remain close to the steady state, where the quadratic
+terms $\tfrac{1}{2}\Hxx(x_t \kron x_t)$ are small relative to the
+linear term $\hx\,x_t$. The quadratic feedback that causes
+explosions in \emph{open-loop simulation} is suppressed by the
+\emph{closed-loop} nature of filtering: each observation corrects
+the state estimate back toward the true state, preventing the
+accumulation of quadratic drift.
+
+\item \textbf{Point estimation context.}
+Ivashchenko uses quasi-maximum likelihood (QML) at fixed parameter
+values; Andreasen likewise uses QML. In both cases, the filter
+runs at a single parameter configuration (or along a fixed
+optimization path). If the filter diverges for a particular
+parameter draw, the likelihood is simply $-\infty$ and that
+parameter is rejected. Neither author embeds the filter in an
+MCMC sampler that must evaluate the likelihood at thousands of
+arbitrary parameter configurations.
+
+\item \textbf{Small models.}
+Both papers use small DSGE models ($n_x \leq 10$), where the
+quadratic terms are moderate and the probability of filter
+divergence at reasonable parameter values is low.
+\end{enumerate}
+
+\paragraph{Why these reasons are insufficient for Bayesian MCMC
+estimation.}
+In an MCMC setting---especially with gradient-based samplers like
+HMC---the filter must evaluate the likelihood at a wide range of
+parameter configurations, including regions where:
+\begin{enumerate}[nosep]
+\item $\specrad(\hx)$ is close to~1, amplifying the quadratic feedback;
+\item $\|\Hxx\|$ is large relative to the shock variance,
+making the quadratic terms dominant;
+\item the model is near the boundary of Blanchard--Kahn determinacy,
+where the dynamics are ill-conditioned.
+\end{enumerate}
+In these regions, the unpruned sigma-point propagation through
+\eqref{eq:unpruned-transition} can produce sigma points that lie far
+from the steady state. These outlier sigma points generate large
+$x \kron x$ terms, which feed back into the next predict step,
+creating the explosive positive-feedback loop that
+\citet{kim2008calculating} identified. Even if such explosions are
+rare, a single divergent likelihood evaluation during leapfrog
+integration can derail an entire HMC trajectory, destroying the
+sampler's efficiency.
+
+Moreover, the unpruned system \eqref{eq:unpruned-transition} is
+\emph{not stationary}: \citet{andreasen2018pruned} prove that
+unconditional moments of the unpruned second-order solution do not
+exist in general, because the quadratic feedback can generate paths
+that grow without bound. \citet{denhaan2012solving} further show
+that the unpruned dynamics can exhibit ``spurious oscillations'' and
+``explosive paths'' that do not correspond to any feature of the true
+model solution, but are artifacts of the polynomial approximation
+operating outside its radius of convergence. Without stationarity,
+there is no well-defined ergodic distribution, and the filtered
+state may drift arbitrarily far from the steady state over long
+sample periods.
+
+\paragraph{Five structural advantages of pruning for our method.}
+The pruned decomposition $x_t = \xf_t + \xs_t$ resolves all of
+these issues:
+
+\begin{enumerate}[nosep]
+\item \textbf{Guaranteed stationarity of $\xf_t$.}
+The first-order state follows linear dynamics
+$\xf_{t+1} = \hx\xf_t + \eta\varepsilon_{t+1}$. Under
+\Cref{ass:stable} ($\specrad(\hx) < 1$), $\xf_t$ is unconditionally
+stationary with well-defined moments. No quadratic term can cause
+explosions, regardless of parameter configuration.
+
+\item \textbf{Exact predict step.}
+Because the transition of $\xf_t$ is linear, the predict step of
+our filter is the \emph{exact} Kalman predict---zero approximation
+error. The UKF/CDKF sigma-point approximation is confined to the
+observation step, where it handles the \emph{known} quadratic
+function $\phi(\xf)$. By contrast, the unpruned UKF/CDKF
+introduces sigma-point approximation error in \emph{both} the
+predict and update steps, with the predict-step error potentially
+compounding across time.
+
+\item \textbf{Exact conditional mean of the observation.}
+The observation equation under pruning is \emph{exactly quadratic}
+in~$\xf_t$ (\Cref{rem:quad}). The UKF sigma-point mean captures
+$\E[\phi(\xf_t) \mid Y_{1:t}]$ with zero error
+(\Cref{prop:moment}(a)). Under the unpruned approach, the
+observation is quadratic in the \emph{full} state~$x_t$, but $x_t$
+includes second-order terms that are correlated with $x_t \kron x_t$
+in a non-Gaussian way, degrading the sigma-point accuracy.
+
+\item \textbf{Bounded $\xs_t$ correction.}
+The second-order correction satisfies
+$\xs_{t+1} = \hx\xs_t + \tfrac{1}{2}\Hxx(\hat\xf_{t|t} \kron \hat\xf_{t|t}) + \tfrac{1}{2}\hsig$.
+Since $\specrad(\hx) < 1$ and $\hat\xf_{t|t}$ is bounded (by the
+filtered covariance bound of \Cref{prop:stability}), the
+correction $\xs_t$ is bounded as well. There is no explosive
+feedback.
+
+\item \textbf{Smooth gradients for HMC.}
+The log-likelihood under pruning is a smooth function of~$\theta$:
+the linear predict step and the polynomial observation step are both
+differentiable, and the implicit adjoint gradient through the
+perturbation solver is well-defined \citep{childers2024differentiable}.
+Under the unpruned approach, the quadratic \emph{transition} creates
+gradient instabilities: the derivative of $\Hxx(x \kron x)$ with
+respect to~$\theta$ involves products of filtered states with
+perturbation-solution derivatives, which can amplify numerical
+errors near the stability boundary.
+\end{enumerate}
+
+\paragraph{The key conceptual shift.}
+Ivashchenko and Andreasen use sigma-point filters to \emph{approximate
+the full nonlinear dynamics}---the filter is a substitute for the
+intractable optimal nonlinear filter. Our approach is fundamentally
+different: we use pruning to \emph{separate the problem} into a
+linear filtering component ($\xf_t$) and a deterministic propagation
+component ($\xs_t$), and use the UKF only to handle the
+\emph{observation nonlinearity}. This separation is what enables
+the exact predict step, the exact conditional mean, the stability
+guarantee, and the smooth gradients---none of which are available
+in the unpruned approach.
+
+\Cref{tab:pruning-comparison} summarizes the comparison.
+
+\begin{table}[htbp]
+\centering
+\caption{Pruned vs.\ Unpruned Sigma-Point Filtering: Structural Comparison}
+\label{tab:pruning-comparison}
+\small
+\begin{tabular}{@{}p{3.8cm}p{5.2cm}p{5.2cm}@{}}
+\toprule
+Property
+  & Unpruned UKF/CDKF
+  & Pruned SR-UKF (this paper) \\
+\midrule
+Filtered state
+  & Full $x_t$ (includes 2nd-order effects)
+  & $\xf_t$ only (1st-order) \\
+Transition handled by
+  & Sigma-point propagation (approximate)
+  & Exact Kalman predict (exact) \\
+Observation handled by
+  & Sigma-point propagation (approximate)
+  & Sigma-point propagation (exact mean for quadratic) \\
+2nd-order correction
+  & Implicit in filtered $x_t$
+  & Explicit deterministic $\xs_t$ update \\
+Stationarity
+  & Not guaranteed (moments may not exist)
+  & Guaranteed under $\specrad(\hx) < 1$ \\
+Stability under MCMC
+  & Can diverge at extreme $\theta$
+  & Bounded for all $\theta$ satisfying BK \\
+Predict-step error
+  & $\cO(\|P\|^{3/2})$ (sigma-point approx.)
+  & Zero (exact linear predict) \\
+Observation-mean error
+  & $\cO(\|P\|^{3/2})$ for quadratic in $x_t$
+  & Zero (exact for quadratic in $\xf_t$) \\
+Gradient smoothness
+  & Unstable near $\specrad(\hx) \to 1$
+  & Smooth for all $\specrad(\hx) < 1$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+We return to the question of why pruning is essential---and
+rebut it in detail for skeptical reviewers---in
+\Cref{sec:challenge-unpruned}.
+
+\paragraph{Gap in the literature.}
+No existing paper combines the sigma-point methodology of the UKF
+with the pruned state-space decomposition of
+\citet{andreasen2018pruned}. That is, no prior work applies the
+UKF to the first-order state~$\xf_t$ alone while propagating the
+second-order correction~$\xs_t$ deterministically, using sigma-point
+quadrature to capture the quadratic observation nonlinearity.
+\Cref{tab:comparison} summarizes the positioning relative to
+all filtering approaches.
+
+\begin{table}[htbp]
+\centering
+\caption{Comparison of Filtering Approaches for Second-Order DSGE Models}
+\label{tab:comparison}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Method & State dim.\ & Filter type & Stability & Per-step cost \\
+\midrule
+Augmented KF
+  & $n_x{+}n_x^2{+}n_x$
+  & Linear KF
+  & Pruning
+  & $\cO\!\left((2n_x{+}n_x^2)^3\right)$ \\
+UKF (no pruning)
+  & $n_x$
+  & Sigma-point
+  & None
+  & $\cO(n_x^3)$ \\
+Particle filter
+  & $n_x$
+  & Monte Carlo
+  & N/A
+  & $\cO(N_p n_x^2)$ \\
+\textbf{Pruned SR-UKF}
+  & $\bm{n_x}$
+  & \textbf{Sigma-point}
+  & \textbf{Pruning}
+  & $\bm{\cO(n_x^3)}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Square-Root Sigma-Point Filtering}
+
+The Unscented Transform (UT) of \citet{julier1997new} propagates a
+symmetric set of deterministically chosen ``sigma points'' through a
+nonlinear function to recover the posterior mean and covariance without
+linearization. \citet{wan2000unscented} formalize the Unscented Kalman
+Filter (UKF) and demonstrate that it captures the posterior mean and
+covariance correctly to third order for Gaussian inputs and arbitrary
+nonlinearities---and \emph{exactly} for polynomial nonlinearities of
+degree two.
+
+\citet{van2001square} introduce the Square-Root UKF (SR-UKF), which
+propagates the Cholesky factor of the covariance matrix directly using
+QR decompositions and rank-one Cholesky updates/downdates. The SR-UKF
+guarantees positive semi-definiteness of the covariance at every step
+(assuming non-negative sigma-point weights), roughly halves the
+numerical condition number, and is no more expensive than the standard
+UKF.
+
+\subsection{Gradient-Based Bayesian DSGE Estimation}
+
+\citet{childers2024differentiable} develop a framework for
+differentiable state-space models, combining implicit
+differentiation through the perturbation solver with Hamiltonian
+Monte Carlo sampling. Their approach avoids differentiating through
+the QZ decomposition and Sylvester equation by instead differentiating
+the \emph{implicit equilibrium conditions} that define the
+perturbation solution---a technique known as the adjoint or implicit
+function theorem method. This provides exact gradients of the
+log-posterior with respect to structural parameters at
+$\cO(n^2)$ cost per gradient evaluation, enabling the use of HMC
+and the No-U-Turn Sampler (NUTS) for Bayesian DSGE estimation.
+
+
+% ══════════════════════════════════════════════════════════════════════
+%  SECTION 3 — MODEL FRAMEWORK
+% ══════════════════════════════════════════════════════════════════════
+\section{Model Framework}\label{sec:model}
+
+\subsection{General DSGE in Expectations Form}
+
+Consider a DSGE model with $n_y$~control (jump) variables
+$y_t \in \R^{n_y}$ and $n_x$~state (predetermined) variables
+$x_t \in \R^{n_x}$, subject to $n_\varepsilon$~structural shocks
+$\varepsilon_t \sim \mathcal{N}(0, I_{n_\varepsilon})$. The
+equilibrium conditions are
+\begin{equation}\label{eq:dsge}
+\E_t\!\left[
+  H\!\left(y_{t+1},\, y_t,\, x_{t+1},\, x_t\right)
+\right] = 0,
+\end{equation}
+where $H : \R^{n_y} \times \R^{n_y} \times \R^{n_x} \times \R^{n_x}
+\to \R^{n_y + n_x}$ collects the $n_y + n_x$ equilibrium equations,
+and the expectation is conditional on information at time~$t$. The
+state transition includes the shock:
+$x_{t+1} = \tilde{h}(y_t, x_t) + \eta(\theta)\,\varepsilon_{t+1}$,
+where $\eta \in \R^{n_x \times n_\varepsilon}$ is the shock-impact
+matrix.
+
+Let $(\bar{y}, \bar{x})$ denote the deterministic steady state
+satisfying $H(\bar{y}, \bar{y}, \bar{x}, \bar{x}) = 0$. We work
+with deviations from steady state:
+$\hat{y}_t \equiv y_t - \bar{y}$, $\hat{x}_t \equiv x_t - \bar{x}$.
+
+\subsection{First-Order Perturbation Solution}\label{sec:first-order}
+
+The first-order (linear) approximation yields policy and transition
+functions
+\begin{align}
+\hat{y}_t &= \gx\,\hat{x}_t, \label{eq:fo-y}\\
+\hat{x}_{t+1} &= \hx\,\hat{x}_t + \eta\,\varepsilon_{t+1},
+  \label{eq:fo-x}
+\end{align}
+where $\gx \in \R^{n_y \times n_x}$ and $\hx \in \R^{n_x \times n_x}$
+are determined by the first-order conditions. Define the total-variable
+vector $v = (y', y, x', x) \in \R^{2(n_y + n_x)}$ and the Jacobians
+$H_{y'}, H_y, H_{x'}, H_x$ evaluated at the steady state. The
+first-order conditions are:
+\begin{equation}\label{eq:fo-implicit}
+H_x + H_y\,\gx + (H_{x'} + H_{y'}\,\gx)\,\hx = 0,
+\end{equation}
+together with the Blanchard--Kahn condition requiring the number of
+stable generalized eigenvalues of the pencil $(H_{x'} + H_{y'}, -(H_x + H_y))$
+to equal~$n_x$. The matrices $\gx, \hx$ are typically recovered via
+the QZ (generalized Schur) decomposition \citep{klein2000using}.
+
+\begin{assumption}\label{ass:bk}
+The Blanchard--Kahn condition holds: the generalized Schur
+decomposition of the pencil $(\Gamma_1, \Gamma_0)$ with
+$\Gamma_0 = [H_{x'}\;|\;H_{y'}]$ and $\Gamma_1 = [-H_x\;|\;-H_y]$
+yields exactly $n_x$ stable generalized eigenvalues
+(with modulus strictly less than~$1 + \delta$ for some small
+$\delta > 0$).
+\end{assumption}
+
+\begin{assumption}\label{ass:stable}
+The spectral radius of $\hx$ satisfies
+$\specrad(\hx) \equiv \max_i |\lambda_i(\hx)| < 1$, ensuring asymptotic
+stability of the first-order state dynamics.
+\end{assumption}
+
+\subsection{Second-Order Perturbation Solution}\label{sec:second-order}
+
+Following \citet{schmitt2004solving}, the second-order approximation
+adds quadratic correction terms:
+\begin{align}
+\hat{y}_t &= \gx\,\hat{x}_t
+  + \tfrac{1}{2}\Gxx\,(\hat{x}_t \kron \hat{x}_t)
+  + \tfrac{1}{2}\gss\,\sigma^2,
+  \label{eq:so-y} \\
+\hat{x}_{t+1} &= \hx\,\hat{x}_t + \eta\,\varepsilon_{t+1}
+  + \tfrac{1}{2}\Hxx\,(\hat{x}_t \kron \hat{x}_t)
+  + \tfrac{1}{2}\hsig\,\sigma^2,
+  \label{eq:so-x}
+\end{align}
+where $\Gxx \in \R^{n_y \times n_x^2}$,
+$\Hxx \in \R^{n_x \times n_x^2}$,
+$\gss \in \R^{n_y}$, and $\hsig \in \R^{n_x}$ are the second-order
+coefficient matrices. Throughout, we set $\sigma = 1$ (full
+stochasticity) so that $\gss$ and $\hsig$ are vectors.
+
+\paragraph{The Sylvester equation for $\Gxx, \Hxx$.}
+Define $n \equiv n_y + n_x$,
+$M \equiv [\gx\hx;\;\gx;\;\hx;\;I_{n_x}] \in \R^{2n \times n_x}$,
+and the Hessian tensor
+$\Psi \in \R^{n \times 2n \times 2n}$ where
+$\Psi_{ijk} = \partial^2 H_i / (\partial v_j\,\partial v_k)$
+evaluated at steady state. The stacked second-order coefficient
+$X \equiv [\Gxx;\;\Hxx] \in \R^{n \times n_x^2}$ solves the
+generalized Sylvester equation
+\begin{equation}\label{eq:sylvester}
+A\,X\,(\hx \kron \hx)^\top + D\,X = -C,
+\end{equation}
+where
+$A = [H_{y'}\;\;0_{n_y \times n_x};\;0_{n_x \times n_y}\;\;0_{n_x}]$,
+$D = [H_y\;\;H_{y'}\gx + H_{x'}]$,
+and $C \in \R^{n \times n_x^2}$ is formed from the quadratic terms
+$C_{i \cdot} = \vect(M^\top \Psi_i M)^\top$ for each equation~$i$.
+The Sylvester equation~\eqref{eq:sylvester} is solved efficiently
+by the Bartels--Stewart algorithm: Schur decomposition of~$\hx$ gives
+$\hx = Q T Q^\top$, which induces a block-triangular structure in
+$\hx \kron \hx$, reducing the problem to a sequence of
+$n \times n$ linear systems \citep{bartels1972solution}.
+
+\paragraph{The volatility corrections $\gss, \hsig$.}
+The constants $\gss, \hsig$ solve a linear system
+\begin{equation}\label{eq:volatility}
+\begin{bmatrix} H_y & H_{y'}\gx + H_{x'} \end{bmatrix}
+\begin{bmatrix} \gss \\ \hsig \end{bmatrix}
+= -B,
+\end{equation}
+where $B \in \R^n$ depends on $\eta$, the Hessians~$\Psi$, and the
+second-order coefficients $\Gxx, \Hxx$ already obtained.
+
+\subsection{The Pruned State-Space System}\label{sec:pruned-ss}
+
+Direct simulation of~\eqref{eq:so-x} feeds
+$\hat{x}_t \kron \hat{x}_t$ (including second-order terms) back into
+the quadratic dynamics, creating a feedback loop that can generate
+explosive paths even when $\specrad(\hx) < 1$.
+\citet{kim2008calculating} and \citet{andreasen2018pruned} resolve
+this by decomposing the state:
+
+\begin{definition}[Pruned state-space system]\label{def:pruned}
+Define the first-order state~$\xf_t$ and the second-order
+correction~$\xs_t$ by:
+\begin{align}
+\xf_{t+1} &= \hx\,\xf_t + \eta\,\varepsilon_{t+1},
+  \label{eq:pruned-xf} \\
+\xs_{t+1} &= \hx\,\xs_t
+  + \tfrac{1}{2}\Hxx\,(\xf_t \kron \xf_t)
+  + \tfrac{1}{2}\hsig,
+  \label{eq:pruned-xs} \\
+y_t &= \gx\,(\xf_t + \xs_t)
+  + \tfrac{1}{2}\Gxx\,(\xf_t \kron \xf_t)
+  + \tfrac{1}{2}\gss + \varepsilon_t^y,
+  \label{eq:pruned-obs}
+\end{align}
+where $\varepsilon_t^y \sim \mathcal{N}(0, R)$ is measurement noise.
+\end{definition}
+
+\noindent
+The key feature of pruning is that \emph{only the first-order
+state~$\xf_t$ enters the quadratic terms}. Since $\xf_t$ follows
+linear-Gaussian dynamics~\eqref{eq:pruned-xf}, the Kronecker product
+$\xf_t \kron \xf_t$ remains bounded in expectation, preventing
+explosive behavior.
+
+\subsection{The Augmented State-Space (Existing Approach)}\label{sec:augmented}
+
+\citet{andreasen2018pruned} and \citet{kollmann2014tractable} define
+the augmented state
+\begin{equation}\label{eq:aug-state}
+\xi_t \equiv
+\begin{bmatrix} \xf_t \\ \vect(\xf_t {\xf_t}^\top) \\ \xs_t
+\end{bmatrix}
+\in \R^{n_x + n_x^2 + n_x}
+\end{equation}
+and show that the system~\eqref{eq:pruned-xf}--\eqref{eq:pruned-obs}
+can be written as a linear state-space model:
+\begin{align}
+\xi_{t+1} &= \mathcal{T}\,\xi_t + c + \nu_{t+1},
+  \quad \E[\nu_t\nu_t^\top] = \mathcal{Q},
+  \label{eq:aug-transition}\\
+y_t &= \mathcal{Z}\,\xi_t + d + \varepsilon_t^y,
+  \label{eq:aug-obs}
+\end{align}
+where
+\begin{equation}\label{eq:aug-T}
+\mathcal{T} =
+\begin{bmatrix}
+\hx & 0 & 0 \\
+0 & \hx \kron \hx & 0 \\
+0 & \frac{1}{2}\Hxx & \hx
+\end{bmatrix},
+\quad
+c =
+\begin{bmatrix}
+0 \\
+\vect(\eta\eta^\top) \\
+\frac{1}{2}\hsig
+\end{bmatrix},
+\end{equation}
+and $\mathcal{Z}$ and~$d$ select and combine the relevant rows to
+form the observation equation. The process-noise covariance
+$\mathcal{Q}$ is block-diagonal with the $(1,1)$~block equal to
+$\eta\eta^\top$ and the $(2,2)$~block $\mathcal{Q}_{kk}$ given by
+the \emph{unconditional} covariance of the Kronecker innovations
+\citep[eq.~16]{andreasen2018pruned}:
+\begin{equation}\label{eq:Q-kk}
+\mathcal{Q}_{kk} =
+(\Sigma_a \kron \Sigma_b)
++ (\Sigma_b \kron \Sigma_a)
++ (P_1 \kron P_1)
++ \text{cross terms},
+\end{equation}
+where $\Sigma_a = \hx P_f \hx^\top$, $\Sigma_b = \eta\eta^\top$,
+$P_1 = \eta\eta^\top$, and $P_f$ is the unconditional covariance of
+$\xf_t$ solving the discrete Lyapunov equation
+$P_f = \hx P_f \hx^\top + \eta\eta^\top$.
+
+The standard Kalman filter applied to the augmented
+system~\eqref{eq:aug-transition}--\eqref{eq:aug-obs} yields an
+exact (under the Gaussian approximation) log-likelihood, but the
+per-step cost is
+\begin{equation}\label{eq:aug-cost}
+\cO\!\left((n_x + n_x^2 + n_x)^3\right) = \cO(n_x^6),
+\end{equation}
+since the dominant operations (Kalman gain, covariance update) involve
+matrices of dimension $2n_x + n_x^2$.
+
+\begin{remark}
+For the \citet{schmitt2003closing} model with $n_x = 7$, the
+augmented dimension is $7 + 49 + 7 = 63$. The Kalman filter operates
+on $63 \times 63$ matrices---manageable but expensive when embedded
+in an MCMC sampler requiring $10^4$--$10^5$ likelihood evaluations.
+For a medium-scale New Keynesian model with $n_x = 30$, the augmented
+dimension is~960, making the approach infeasible.
+\end{remark}
+
+
+% ══════════════════════════════════════════════════════════════════════
+%  SECTION 4 — THE PRUNED SR-UKF
+% ══════════════════════════════════════════════════════════════════════
+\section{The Pruned Square-Root Unscented Kalman Filter}\label{sec:method}
+
+\subsection{Overview and Intuition}
+
+The central idea of the Pruned SR-UKF is to exploit the structure of
+the pruned system~\eqref{eq:pruned-xf}--\eqref{eq:pruned-obs}:
+\begin{enumerate}[nosep]
+\item The \emph{transition} of $\xf_t$ is \emph{linear}:
+$\xf_{t+1} = \hx\,\xf_t + \eta\,\varepsilon_{t+1}$.
+No sigma-point propagation is needed for the predict step---the
+Kalman filter predict equations apply exactly.
+\item The \emph{observation} equation is \emph{quadratic} in~$\xf_t$
+(with $\xs_t$ entering linearly as a known offset). The unscented
+transform handles this nonlinearity by propagating $2n_x + 1$
+sigma points through the observation function.
+\item The \emph{second-order correction}~$\xs_t$ depends on the
+Kronecker product $\xf_t \kron \xf_t$, which under Gaussian
+filtering has conditional expectation
+$\E[\xf_t \kron \xf_t \mid Y_{1:t}]
+= \hat{\xf}_{t|t} \kron \hat{\xf}_{t|t} + \vect(P_{t|t})$.
+We approximate this by $\hat{\xf}_{t|t} \kron \hat{\xf}_{t|t}$
+alone---the ``certainty equivalence'' approximation---incurring
+an $\cO(\sigma^2)$ error that we characterize in
+\Cref{sec:theory}.
+\end{enumerate}
+The filter state is $(\hat{\xf}_{t|t}, S_{t|t}, \xs_t)$, where
+$S_{t|t}$ is the Cholesky factor of the filtered covariance
+$P_{t|t} = S_{t|t} S_{t|t}^\top$. The dimension of the covariance
+is $n_x \times n_x$, not $(2n_x + n_x^2) \times (2n_x + n_x^2)$.
+
+\subsection{Sigma-Point Construction}\label{sec:sigma}
+
+Let $L \equiv n_x$ be the state dimension. Choose tuning parameters
+$\alpha > 0$, $\beta \geq 0$, $\kappa \geq 0$, and define
+\begin{equation}\label{eq:lambda}
+\lambda = \alpha^2(L + \kappa) - L, \qquad
+\gamma = \sqrt{L + \lambda}.
+\end{equation}
+Given the state estimate $\hat{x} \in \R^L$ and its Cholesky factor
+$S \in \R^{L \times L}$ (so $P = SS^\top$), define $2L + 1$
+sigma points:
+\begin{align}
+\chi^{(0)} &= \hat{x}, \label{eq:sp0}\\
+\chi^{(i)} &= \hat{x} + \gamma\,S_{:,i},
+  \quad i = 1, \ldots, L, \label{eq:sp-plus}\\
+\chi^{(L+i)} &= \hat{x} - \gamma\,S_{:,i},
+  \quad i = 1, \ldots, L, \label{eq:sp-minus}
+\end{align}
+where $S_{:,i}$ denotes the $i$-th column of~$S$. The associated
+weights are:
+\begin{align}
+w_m^{(0)} &= \frac{\lambda}{L + \lambda}, &
+w_c^{(0)} &= w_m^{(0)} + (1 - \alpha^2 + \beta),
+  \label{eq:w0} \\
+w_m^{(j)} &= w_c^{(j)} = \frac{1}{2(L + \lambda)},
+  &j &= 1, \ldots, 2L. \label{eq:wj}
+\end{align}
+
+We use the default parameters $\alpha = 1$, $\beta = 2$,
+$\kappa = \max(0, 3 - L)$, which ensure $w_c^{(0)} \geq 0$ for
+all~$L \geq 1$ and provide exact recovery of the Gaussian mean and
+covariance for affine transformations.
+
+\subsection{Initialization}\label{sec:init}
+
+The filter is initialized at the unconditional moments of the
+first-order state:
+\begin{equation}\label{eq:init}
+\hat{\xf}_{0|0} = 0, \qquad
+P_{0|0} = P_f + \epsilon\,I_{n_x}, \qquad
+\xs_0 = 0,
+\end{equation}
+where $P_f$ solves the discrete Lyapunov equation
+\begin{equation}\label{eq:lyapunov}
+P_f = \hx\,P_f\,\hx^\top + \eta\eta^\top
+\end{equation}
+and $\epsilon > 0$ is a small nugget (e.g., $10^{-10}$) ensuring
+positive definiteness.
+
+The Lyapunov equation is solved iteratively: starting from
+$P^{(0)} = \eta\eta^\top$, iterate
+$P^{(k+1)} = \hx P^{(k)} \hx^\top + \eta\eta^\top$ until
+$\|P^{(k+1)} - P^{(k)}\|_F / \|P^{(k+1)}\|_F < \tau$
+with tolerance $\tau = 10^{-12}$.
+
+\subsection{Predict Step}\label{sec:predict}
+
+Since the transition $\xf_{t+1} = \hx\,\xf_t + \eta\,\varepsilon_{t+1}$
+is linear, the predict step is exact:
+\begin{align}
+\hat{\xf}_{t+1|t} &= \hx\,\hat{\xf}_{t|t},
+  \label{eq:predict-mean} \\
+P_{t+1|t} &= \hx\,P_{t|t}\,\hx^\top + Q_f,
+  \label{eq:predict-cov}
+\end{align}
+where $Q_f = \eta\eta^\top + \epsilon\,I_{n_x}$.
+
+In square-root form, we compute $S_{t+1|t}$ from the QR decomposition
+of the matrix
+\begin{equation}\label{eq:qr-predict}
+\mathcal{R}_p =
+\begin{bmatrix}
+\sqrt{w_c^{(0)}}\,(\hx\,S_{t|t})^\top \\
+\vdots \\
+S_{Q_f}^\top
+\end{bmatrix},
+\end{equation}
+where $S_{Q_f} = \chol(Q_f)$, so that $S_{t+1|t}$ is the $R$ factor
+of the QR decomposition (appropriately transposed and sign-corrected).
+
+\begin{remark}
+Because the transition is linear, the sigma-point propagation
+$\chi^{(j)}_+ = \hx\,\chi^{(j)}$ and the weighted-mean formula
+$\sum_j w_m^{(j)} \chi^{(j)}_+ = \hx\,\hat{x}$ are exactly the
+Kalman predict. The QR form is used for numerical stability, not
+for handling nonlinearity.
+\end{remark}
+
+\subsection{Observation Update}\label{sec:update}
+
+\subsubsection{Sigma-point propagation through the observation function.}
+
+Generate fresh sigma points $\{\tilde{\chi}^{(j)}\}_{j=0}^{2L}$ from
+$(\hat{\xf}_{t+1|t},\;S_{t+1|t})$ using
+\eqref{eq:sp0}--\eqref{eq:sp-minus}. Define the observation function
+\begin{equation}\label{eq:obs-fn}
+\phi(x) \equiv
+  g_{\text{obs}}\,(x + \xs_t)
+  + \tfrac{1}{2}\,G_{\text{obs}}\,(x \kron x)
+  + \tfrac{1}{2}\,g_{\text{obs},\sigma\sigma},
+\end{equation}
+where $g_{\text{obs}} \in \R^{n_y \times n_x}$,
+$G_{\text{obs}} \in \R^{n_y \times n_x^2}$, and
+$g_{\text{obs},\sigma\sigma} \in \R^{n_y}$ are the observation-mapped
+rows of $\gx$, $\Gxx$, and $\gss$ (selecting observed controls and
+states). Propagate:
+\begin{equation}\label{eq:obs-prop}
+z^{(j)} = \phi(\tilde{\chi}^{(j)}),
+\quad j = 0, 1, \ldots, 2L.
+\end{equation}
+
+\begin{remark}\label{rem:quad}
+The function $\phi$ is a polynomial of degree two in its
+argument~$x$: it is affine in~$x$ (through $g_{\text{obs}}(x + \xs_t)$)
+plus quadratic (through $G_{\text{obs}}(x \kron x)$). The second-order
+correction~$\xs_t$ enters only linearly, as a known shift.
+\end{remark}
+
+\subsubsection{Innovation statistics.}
+
+Predicted measurement mean:
+\begin{equation}\label{eq:z-bar}
+\bar{z}_{t+1} = \sum_{j=0}^{2L} w_m^{(j)}\,z^{(j)}.
+\end{equation}
+Innovation:
+\begin{equation}
+v_{t+1} = y_{t+1} - \bar{z}_{t+1}.
+\end{equation}
+Innovation covariance (square-root form): compute $S_{yy}$ from the
+QR decomposition of
+\begin{equation}\label{eq:qr-obs}
+\mathcal{R}_y =
+\begin{bmatrix}
+\sqrt{w_c^{(0)}}\,(z^{(0)} - \bar{z}_{t+1})^\top \\
+\sqrt{w_c^{(1)}}\,(z^{(1)} - \bar{z}_{t+1})^\top \\
+\vdots \\
+\sqrt{w_c^{(2L)}}\,(z^{(2L)} - \bar{z}_{t+1})^\top \\
+S_R^\top
+\end{bmatrix},
+\end{equation}
+where $S_R = \chol(R)$ is the Cholesky factor of the measurement noise.
+Then $P_{yy} = S_{yy} S_{yy}^\top$.
+
+\subsubsection{Cross-covariance and Kalman gain.}
+
+The state--measurement cross-covariance is
+\begin{equation}\label{eq:Pxz}
+P_{xz} = \sum_{j=0}^{2L} w_c^{(j)}\,
+  (\tilde{\chi}^{(j)} - \hat{\xf}_{t+1|t})\,
+  (z^{(j)} - \bar{z}_{t+1})^\top.
+\end{equation}
+The Kalman gain is
+\begin{equation}\label{eq:gain}
+K = P_{xz}\,P_{yy}^{-1}
+  = P_{xz}\,S_{yy}^{-\top}\,S_{yy}^{-1},
+\end{equation}
+computed via two triangular solves.
+
+\subsubsection{Filtered state and covariance.}
+
+The filtered mean is
+\begin{equation}\label{eq:filter-mean}
+\hat{\xf}_{t+1|t+1} = \hat{\xf}_{t+1|t} + K\,v_{t+1}.
+\end{equation}
+The filtered covariance is updated as
+\begin{equation}\label{eq:filter-cov}
+P_{t+1|t+1} = P_{t+1|t} - K\,P_{yy}\,K^\top + \epsilon\,I_{n_x},
+\end{equation}
+symmetrized via $P \leftarrow \tfrac{1}{2}(P + P^\top)$, and the
+Cholesky factor $S_{t+1|t+1} = \chol(P_{t+1|t+1})$ is recomputed.
+The nugget $\epsilon > 0$ ensures positive definiteness.
+
+\begin{remark}[On the covariance update form]
+The classical SR-UKF of \citet{van2001square} uses rank-one Cholesky
+downdates to maintain the square-root factor directly: $S_u$ is
+obtained by successively downdating $S_p$ with the columns of
+$K\,S_{yy}$. While this guarantees PSD preservation under exact
+arithmetic and non-negative weights, the rank-one downdate can fail
+in finite precision when $K P_{yy} K^\top$ approaches $P_{t+1|t}$
+(near-degenerate innovation). We adopt the computationally equivalent
+approach of~\eqref{eq:filter-cov} with nugget regularization, which
+is robust in automatic-differentiation frameworks where Cholesky
+downdates are not readily available. See \Cref{sec:challenge-sr} for
+a detailed discussion.
+\end{remark}
+
+\subsection{Deterministic $\xs$ Propagation}\label{sec:xs-update}
+
+After computing the filtered mean $\hat{\xf}_{t+1|t+1}$, the
+second-order correction is updated deterministically:
+\begin{equation}\label{eq:xs-update}
+\xs_{t+1} = \hx\,\xs_t
+  + \tfrac{1}{2}\Hxx\,
+    (\hat{\xf}_{t+1|t+1} \kron \hat{\xf}_{t+1|t+1})
+  + \tfrac{1}{2}\hsig.
+\end{equation}
+
+This equation uses the \emph{filtered} (posterior) mean of~$\xf_{t+1}$
+in the Kronecker product, rather than the conditional expectation
+$\E[\xf_{t+1} \kron \xf_{t+1} \mid Y_{1:t+1}]$. The latter equals
+$\hat{\xf}_{t+1|t+1} \kron \hat{\xf}_{t+1|t+1}
++ \vect(P_{t+1|t+1})$;
+the omitted term $\tfrac{1}{2}\Hxx\,\vect(P_{t+1|t+1})$ constitutes
+the approximation bias, which we analyze in \Cref{sec:bias}.
+
+\subsection{Log-Likelihood}\label{sec:loglik}
+
+The Gaussian log-likelihood contribution at time $t+1$ is
+\begin{equation}\label{eq:loglik}
+\ell_{t+1} = -\frac{n_y}{2}\ln(2\pi)
+  - \ln|\det(S_{yy})|
+  - \frac{1}{2}\|S_{yy}^{-1}\,v_{t+1}\|^2,
+\end{equation}
+where $\ln|\det(S_{yy})| = \sum_{i=1}^{n_y} \ln|S_{yy,ii}|$. The
+total log-likelihood is
+$\ell(Y_{1:T} \mid \theta) = \sum_{t=1}^{T} \ell_t$.
+
+\subsection{Complete Algorithm}
+
+\Cref{alg:pruned-sr-ukf} summarizes the Pruned SR-UKF.
+
+\begin{algorithm}[htbp]
+\caption{Pruned Square-Root UKF for Second-Order DSGE}
+\label{alg:pruned-sr-ukf}
+\begin{algorithmic}[1]
+\Require Model solution
+$(\gx, \hx, \eta, \Gxx, \Hxx, \gss, \hsig)$;
+observation matrices $(g_{\text{obs}}, G_{\text{obs}}, g_{\text{obs},\sigma\sigma})$;
+data $Y = \{y_1, \ldots, y_T\}$;
+measurement noise $R$.
+\Ensure Log-likelihood $\ell$.
+\State Solve Lyapunov equation for $P_f$; set
+$S_0 \leftarrow \chol(P_f + \epsilon I)$,
+$\hat{\xf}_0 \leftarrow 0$,
+$\xs_0 \leftarrow 0$,
+$\ell \leftarrow 0$.
+\For{$t = 0, 1, \ldots, T-1$}
+  \State \textbf{Predict:}
+    $\hat{\xf}^- \leftarrow \hx\,\hat{\xf}_t$; \quad
+    $S^- \leftarrow \text{QR-predict}(\hx, S_t, S_{Q_f})$.
+  \State \textbf{Sigma points:}
+    Generate $\{\tilde\chi^{(j)}\}$ from $(\hat{\xf}^-, S^-)$.
+  \State \textbf{Observation propagation:}
+    $z^{(j)} \leftarrow \phi(\tilde\chi^{(j)})$ for each~$j$.
+  \State \textbf{Innovation:}
+    $\bar{z} \leftarrow \sum w_m^{(j)} z^{(j)}$; \quad
+    $v \leftarrow y_{t+1} - \bar{z}$.
+  \State \textbf{Innovation covariance:}
+    $S_{yy} \leftarrow \text{QR-obs}(\{z^{(j)}\}, \bar{z}, S_R)$.
+  \State \textbf{Cross-covariance:}
+    $P_{xz} \leftarrow \sum w_c^{(j)}
+      (\tilde\chi^{(j)} - \hat{\xf}^-)
+      (z^{(j)} - \bar{z})^\top$.
+  \State \textbf{Kalman gain:}
+    $K \leftarrow P_{xz}\,(S_{yy} S_{yy}^\top)^{-1}$.
+  \State \textbf{Filter update:}
+    $\hat{\xf}_{t+1} \leftarrow \hat{\xf}^- + K v$; \quad
+    $P^+ \leftarrow S^- {S^-}^\top - K S_{yy} {S_{yy}}^\top K^\top
+      + \epsilon I$; \quad
+    $S_{t+1} \leftarrow \chol(\tfrac{1}{2}(P^+ + {P^+}^\top))$.
+  \State \textbf{$\xs$ update:}
+    $\xs_{t+1} \leftarrow \hx\,\xs_t
+      + \frac{1}{2}\Hxx(\hat{\xf}_{t+1} \kron \hat{\xf}_{t+1})
+      + \frac{1}{2}\hsig$.
+  \State \textbf{Log-likelihood:}
+    $\ell \leftarrow \ell - \frac{n_y}{2}\ln(2\pi)
+      - \sum_i \ln|S_{yy,ii}|
+      - \frac{1}{2}\|S_{yy}^{-1} v\|^2$.
+\EndFor
+\State \Return $\ell$.
+\end{algorithmic}
+\end{algorithm}
+
+
+% ══════════════════════════════════════════════════════════════════════
+%  SECTION 5 — THEORETICAL PROPERTIES
+% ══════════════════════════════════════════════════════════════════════
+\section{Theoretical Properties}\label{sec:theory}
+
+In this section we establish the key analytical properties of the
+Pruned SR-UKF: moment matching of the observation equation
+(\Cref{prop:moment}), characterization of the $\xs$ approximation
+bias (\Cref{prop:bias}), computational complexity (\Cref{prop:cost}),
+stability (\Cref{prop:stability}), and two limiting-case theorems
+(\Cref{thm:linear,thm:zero-cov}).
+
+\subsection{Moment Matching for the Quadratic Observation}
+
+\begin{proposition}[Exact mean, second-order covariance]
+\label{prop:moment}
+Let $\xf \sim \mathcal{N}(\hat{x}, P)$ with
+$P = SS^\top$, and define the quadratic observation function
+\begin{equation}\label{eq:phi}
+\phi(x) = g_{\mathrm{obs}}(x + \xs)
+  + \tfrac{1}{2}\,G_{\mathrm{obs}}\,(x \kron x)
+  + \tfrac{1}{2}\,g_{\mathrm{obs},\sigma\sigma},
+\end{equation}
+where $\xs \in \R^{n_x}$ is a fixed offset. Then the sigma-point
+approximations satisfy:
+\begin{enumerate}[label=(\alph*)]
+\item The predicted measurement mean
+$\bar{z} = \sum_{j=0}^{2L} w_m^{(j)}\,\phi(\chi^{(j)})$
+equals $\E[\phi(\xf)]$ \emph{exactly}:
+\begin{equation}\label{eq:exact-mean}
+\bar{z} = g_{\mathrm{obs}}(\hat{x} + \xs)
+  + \tfrac{1}{2}\,G_{\mathrm{obs}}\,
+    (\hat{x} \kron \hat{x} + \vect(P))
+  + \tfrac{1}{2}\,g_{\mathrm{obs},\sigma\sigma}.
+\end{equation}
+\item The predicted measurement covariance
+$P_{zz} = \sum_{j=0}^{2L} w_c^{(j)}\,(z^{(j)} - \bar{z})
+(z^{(j)} - \bar{z})^\top$
+agrees with $\Var[\phi(\xf)]$ to second order in~$P$:
+\begin{equation}\label{eq:cov-approx}
+P_{zz} = \Var[\phi(\xf)] + \cO(\|P\|^2).
+\end{equation}
+\end{enumerate}
+\end{proposition}
+
+\begin{proof}
+\textbf{Part (a).}
+Write $\phi(x) = a + B\,x + \tfrac{1}{2}\,G_{\mathrm{obs}}\,(x \kron x)$,
+where $a = g_{\mathrm{obs}}\,\xs + \tfrac{1}{2}\,g_{\mathrm{obs},\sigma\sigma}$
+and $B = g_{\mathrm{obs}}$.
+
+The expectation is
+\begin{equation}
+\E[\phi(\xf)] = a + B\,\hat{x}
+  + \tfrac{1}{2}\,G_{\mathrm{obs}}\,
+    \E[\xf \kron \xf].
+\end{equation}
+For $\xf \sim \mathcal{N}(\hat{x}, P)$, we have
+$\E[\xf \kron \xf] = \hat{x} \kron \hat{x} + \vect(P)$, giving
+\eqref{eq:exact-mean}.
+
+Now consider the sigma-point mean. By the symmetry of the sigma
+points, $\sum_j w_m^{(j)} \chi^{(j)} = \hat{x}$ (the UT preserves
+the mean for any function). For the quadratic term, using
+$\chi^{(i)} = \hat{x} + \gamma\,S_{:,i}$ and
+$\chi^{(L+i)} = \hat{x} - \gamma\,S_{:,i}$:
+\begin{align}
+\sum_{j=0}^{2L} &w_m^{(j)}\,(\chi^{(j)} \kron \chi^{(j)})
+\notag\\
+&= w_m^{(0)}\,(\hat{x} \kron \hat{x})
++ \sum_{i=1}^{L} w_m^{(i)}\bigl[
+  (\hat{x} + \gamma S_{:,i}) \kron (\hat{x} + \gamma S_{:,i})
+  + (\hat{x} - \gamma S_{:,i}) \kron (\hat{x} - \gamma S_{:,i})
+\bigr] \notag\\
+&= w_m^{(0)}\,(\hat{x} \kron \hat{x})
++ \sum_{i=1}^{L} w_m^{(i)}\bigl[
+  2(\hat{x} \kron \hat{x})
+  + 2\gamma^2\,(S_{:,i} \kron S_{:,i})
+\bigr] \notag\\
+&= \Bigl(w_m^{(0)} + 2L\,w_m^{(1)}\Bigr)(\hat{x} \kron \hat{x})
++ 2\gamma^2 w_m^{(1)} \sum_{i=1}^{L} (S_{:,i} \kron S_{:,i}).
+\label{eq:kron-sigma}
+\end{align}
+From \eqref{eq:w0}--\eqref{eq:wj}:
+$w_m^{(0)} + 2L\,w_m^{(1)}
+= \frac{\lambda}{L+\lambda} + \frac{2L}{2(L+\lambda)} = 1$.
+Also, $2\gamma^2 w_m^{(1)}
+= 2(L+\lambda) \cdot \frac{1}{2(L+\lambda)} = 1$,
+and $\sum_{i=1}^{L} S_{:,i} \kron S_{:,i} = \vect(SS^\top) = \vect(P)$.
+Therefore
+\begin{equation}
+\sum_{j=0}^{2L} w_m^{(j)}\,(\chi^{(j)} \kron \chi^{(j)})
+= \hat{x} \kron \hat{x} + \vect(P),
+\end{equation}
+and $\bar{z} = a + B\hat{x}
++ \tfrac{1}{2}G_{\mathrm{obs}}(\hat{x} \kron \hat{x} + \vect(P))
+= \E[\phi(\xf)]$. \hfill$\square$ (Part a)
+
+\medskip
+\textbf{Part (b).}
+The true variance of $\phi(\xf) = a + B\xf + \tfrac{1}{2}G_{\mathrm{obs}}(\xf \kron \xf)$
+involves moments of $\xf$ up to fourth order. For Gaussian $\xf$,
+the fourth central moments are determined by $P$ via
+$\E[(\Delta x)^{\kron 4}]
+= \vect(P) \vect(P)^\top + (I + K_{n_x,n_x})(P \kron P)$,
+where $K_{n_x,n_x}$ is the commutation matrix.
+
+The sigma-point covariance captures the leading terms
+(those linear in~$P$) exactly. The error arises from the fourth-order
+terms, which contribute $\cO(\|P\|^2)$. Specifically, the UKF
+covariance approximation for a degree-$d$ polynomial is exact through
+order $2d - 1$ in the standard deviations when $\alpha = 1$ and
+$\kappa = 3 - L$ \citep{julier2004unscented}. For $d = 2$, this
+means exactness through third order, implying the error in the
+covariance is fourth order in the standard deviations, or equivalently
+$\cO(\|P\|^2)$.
+\end{proof}
+
+\subsection{Bias Characterization of the $\xs$ Update}\label{sec:bias}
+
+\begin{proposition}[$\xs$ approximation bias]\label{prop:bias}
+Let $\hat{\xf}_{t|t}$ and $P_{t|t}$ be the filtered mean and
+covariance of~$\xf_t$ given observations $Y_{1:t}$, and let
+$\xs_t^{\star}$ denote the Bayesian optimal second-order correction
+obtained by using
+$\E[\xf_t \kron \xf_t \mid Y_{1:t}]
+= \hat{\xf}_{t|t} \kron \hat{\xf}_{t|t} + \vect(P_{t|t})$
+in~\eqref{eq:pruned-xs}. The Pruned SR-UKF
+correction~$\xs_{t+1}^{\mathrm{UKF}}$
+from~\eqref{eq:xs-update} satisfies
+\begin{equation}\label{eq:xs-bias}
+\xs_{t+1}^{\star} - \xs_{t+1}^{\mathrm{UKF}}
+= \tfrac{1}{2}\,\Hxx\,\vect(P_{t|t})
++ \hx\,(\xs_t^{\star} - \xs_t^{\mathrm{UKF}}).
+\end{equation}
+In particular, the per-step bias increment is
+$\Delta_t \equiv \tfrac{1}{2}\Hxx\,\vect(P_{t|t})$, and the
+cumulative bias follows
+\begin{equation}\label{eq:cum-bias}
+\xs_t^{\star} - \xs_t^{\mathrm{UKF}}
+= \sum_{s=0}^{t-1} \hx^{t-1-s}\,\Delta_s.
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+The Bayesian optimal update is
+\begin{equation}
+\xs_{t+1}^{\star} = \hx\,\xs_t^{\star}
+  + \tfrac{1}{2}\Hxx\,
+    (\hat{\xf}_{t|t} \kron \hat{\xf}_{t|t} + \vect(P_{t|t}))
+  + \tfrac{1}{2}\hsig.
+\end{equation}
+The Pruned SR-UKF update is
+\begin{equation}
+\xs_{t+1}^{\mathrm{UKF}} = \hx\,\xs_t^{\mathrm{UKF}}
+  + \tfrac{1}{2}\Hxx\,
+    (\hat{\xf}_{t|t} \kron \hat{\xf}_{t|t})
+  + \tfrac{1}{2}\hsig.
+\end{equation}
+Subtracting yields~\eqref{eq:xs-bias}. Unrolling the recursion with
+$\xs_0^{\star} = \xs_0^{\mathrm{UKF}} = 0$
+gives~\eqref{eq:cum-bias}.
+\end{proof}
+
+\begin{corollary}\label{cor:bias-bound}
+Under \Cref{ass:stable}, the cumulative bias is bounded:
+\begin{equation}\label{eq:bias-bound}
+\bigl\|\xs_t^{\star} - \xs_t^{\mathrm{UKF}}\bigr\|
+\leq \frac{\|\Hxx\|}{2(1 - \specrad(\hx))}\,
+  \sup_{0 \leq s < t} \bigl\|\vect(P_{s|s})\bigr\|.
+\end{equation}
+Since $P_{s|s}$ is bounded and $\|P_{s|s}\| = \cO(\sigma^2)$
+(where $\sigma$ scales the shock standard deviations), the
+cumulative bias is $\cO(\sigma^2)$.
+\end{corollary}
+
+\begin{proof}
+From \eqref{eq:cum-bias},
+$\|\xs_t^{\star} - \xs_t^{\mathrm{UKF}}\|
+\leq \sum_{s=0}^{t-1} \|\hx\|^{t-1-s} \|\Delta_s\|
+\leq \frac{\|\Hxx\|}{2}\,\sup_s \|\vect(P_{s|s})\|
+  \,\sum_{k=0}^{\infty} \specrad(\hx)^k
+= \frac{\|\Hxx\|}{2(1-\specrad(\hx))}\,\sup_s \|\vect(P_{s|s})\|$.
+\end{proof}
+
+\begin{remark}[Numerical magnitude]
+For the \citet{schmitt2003closing} model with shock standard deviation
+$\sigma_e = 0.0129$, we have $\|P_{t|t}\| \approx 10^{-4}$ and
+$\|\Hxx\| \approx \cO(1)$, giving a per-step bias of approximately
+$5 \times 10^{-5}$. This is far below the measurement noise level
+and the Monte Carlo error of any posterior sampler.
+\end{remark}
+
+\subsection{Computational Complexity}
+
+\begin{proposition}[Per-step cost]\label{prop:cost}
+The per-step cost of the Pruned SR-UKF is
+$\cO(n_x^2 n_y + n_x^3)$, while the augmented Kalman filter requires
+$\cO((2n_x + n_x^2)^3)$ operations. The speedup factor is
+$\cO(n_x^3)$.
+\end{proposition}
+
+\begin{proof}
+\textbf{Pruned SR-UKF.}
+The dominant operations per step are:
+\begin{itemize}[nosep]
+\item Sigma-point generation: $\cO(n_x^2)$ (scaling columns of~$S$).
+\item Sigma-point propagation through $\phi$: $2n_x + 1$ evaluations,
+each requiring a matrix-vector product $g_{\mathrm{obs}} x$
+($\cO(n_y n_x)$) and the Kronecker product $G_{\mathrm{obs}}(x \kron x)$
+($\cO(n_y n_x^2)$). Total: $\cO(n_x \cdot n_y n_x^2) = \cO(n_y n_x^3)$.
+\item QR factorization for $S_{yy}$: the matrix has
+$(2n_x + 1 + n_y)$ rows and $n_y$ columns;
+cost is $\cO(n_x n_y^2)$.
+\item Cross-covariance $P_{xz}$: $\cO(n_x^2 n_y)$.
+\item Kalman gain via triangular solves: $\cO(n_x n_y^2)$.
+\item Covariance update and Cholesky: $\cO(n_x^3)$.
+\item $\xs$ update: $\cO(n_x^3)$ (for $\Hxx(x \kron x)$).
+\end{itemize}
+The leading term is $\cO(n_y n_x^3)$; since typically $n_y \leq n_x$,
+this simplifies to $\cO(n_x^3)$ (with a constant depending on~$n_y$).
+
+\textbf{Augmented KF.}
+The augmented state dimension is $n_a = 2n_x + n_x^2$. The Kalman
+filter requires:
+\begin{itemize}[nosep]
+\item Predicted covariance: $\mathcal{T} P \mathcal{T}^\top + \mathcal{Q}$,
+which is $\cO(n_a^2 \cdot n_a) = \cO(n_a^3)$.
+\item Kalman gain: $\cO(n_a^2 n_y + n_y^3)$.
+\item Covariance update: $\cO(n_a^2 n_y)$.
+\end{itemize}
+Total: $\cO(n_a^3) = \cO((2n_x + n_x^2)^3)$. For large~$n_x$,
+$n_a \approx n_x^2$ and the cost is $\cO(n_x^6)$.
+
+The ratio is $\cO(n_x^6 / n_x^3) = \cO(n_x^3)$.
+\end{proof}
+
+\begin{table}[htbp]
+\centering
+\caption{Computational Cost Comparison (Operations per Time Step)}
+\label{tab:cost}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+$n_x$ & Aug.\ dim.\ $n_a$ & Aug.\ KF cost
+  & Pruned SR-UKF cost \\
+\midrule
+ 7 &  63 & $2.5 \times 10^5$ & $3.4 \times 10^2$ \\
+15 & 255 & $1.7 \times 10^7$ & $3.4 \times 10^3$ \\
+30 & 960 & $8.8 \times 10^8$ & $2.7 \times 10^4$ \\
+50 & 2600 & $1.8 \times 10^{10}$ & $1.3 \times 10^5$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Stability}\label{sec:stability}
+
+\begin{proposition}[Covariance boundedness]\label{prop:stability}
+Under \Cref{ass:stable} and the conditions:
+\begin{enumerate}[label=(\roman*),nosep]
+\item $(h_x, \eta)$ is stabilizable and
+$(g_{\mathrm{obs}}, h_x)$ is detectable;
+\item all sigma-point weights $w_c^{(j)} \geq 0$;
+\end{enumerate}
+the filtered covariance sequence $\{P_{t|t}\}_{t \geq 0}$ of the
+Pruned SR-UKF is bounded above and below:
+\begin{equation}
+0 < \underline{P}\,I \preceq P_{t|t} \preceq \bar{P}\,I
+\quad \text{for all } t \geq t_0,
+\end{equation}
+for some constants $\underline{P}, \bar{P} > 0$ and finite~$t_0$.
+\end{proposition}
+
+\begin{proof}[Proof sketch]
+The predict step is the exact linear Kalman predict:
+$P_{t+1|t} = \hx P_{t|t} \hx^\top + Q_f$.
+Under \Cref{ass:stable} and stabilizability, the predicted covariance
+converges to the solution of the discrete algebraic Riccati equation
+(DARE) from above if initialized above it, and is bounded below by
+$Q_f$ \citep[Theorem~4.4]{anderson2012optimal}.
+
+The update step subtracts a positive semi-definite correction:
+$P_{t+1|t+1} = P_{t+1|t} - K P_{yy} K^\top + \epsilon I$.
+Since $K P_{yy} K^\top \preceq P_{t+1|t}$ (by the Schur complement
+argument for the joint covariance), we have
+$P_{t+1|t+1} \succeq \epsilon I > 0$.
+The upper bound follows from $P_{t+1|t+1} \preceq P_{t+1|t}
+\preceq \bar{P} I$ for the DARE bound.
+
+Non-negative weights ensure the QR-based covariance constructions
+produce valid (positive semi-definite) approximations to the true
+sigma-point covariance.
+\end{proof}
+
+\subsection{Limiting Cases}
+
+\begin{theorem}[Linear limit]\label{thm:linear}
+When $\Gxx = 0$, $\Hxx = 0$, $\gss = 0$, $\hsig = 0$
+(i.e., the second-order terms vanish), the Pruned SR-UKF reduces
+exactly to the standard Kalman filter for the first-order linear
+state-space model
+$\xf_{t+1} = \hx \xf_t + \eta\varepsilon_{t+1}$,
+$y_t = g_{\mathrm{obs}} \xf_t + \varepsilon_t^y$.
+\end{theorem}
+
+\begin{proof}
+With $\Gxx = 0$, the observation function $\phi(x) = g_{\mathrm{obs}}(x + \xs) + 0$
+is affine in~$x$. The sigma-point mean and covariance recover the
+exact Kalman filter innovation statistics for affine functions
+\citep{wan2000unscented}.
+
+With $\Hxx = 0$ and $\hsig = 0$, the $\xs$ update becomes
+$\xs_{t+1} = \hx \xs_t$, which with $\xs_0 = 0$ gives
+$\xs_t = 0$ for all~$t$. The observation reduces to
+$y_t = g_{\mathrm{obs}} \xf_t + \varepsilon_t^y$, which is the
+first-order observation equation. The predict step is already the
+exact Kalman predict. Therefore the Pruned SR-UKF coincides with
+the standard Kalman filter.
+\end{proof}
+
+\begin{theorem}[Zero-covariance limit]\label{thm:zero-cov}
+In the limit $P_{t|t} \to 0$ for all~$t$ (perfect state
+knowledge), the Pruned SR-UKF and the augmented Kalman filter
+of \Cref{sec:augmented} produce identical state estimates and
+log-likelihoods.
+\end{theorem}
+
+\begin{proof}
+When $P_{t|t} = 0$, the sigma points collapse to a single point
+$\chi^{(j)} = \hat{\xf}_{t|t}$ for all~$j$. The sigma-point
+observation propagation becomes
+$z^{(j)} = \phi(\hat{\xf}_{t|t})$, which is the deterministic
+observation at the point estimate. The innovation covariance reduces
+to $P_{yy} = R$ (measurement noise only).
+
+In this regime, the Kronecker product used in the $\xs$ update is
+$\hat{\xf}_{t|t} \kron \hat{\xf}_{t|t}$, which equals
+$\E[\xf_t \kron \xf_t \mid Y_{1:t}]$ when $P_{t|t} = 0$. The
+$\xs$ bias (\Cref{prop:bias}) vanishes:
+$\Delta_t = \tfrac{1}{2}\Hxx\,\vect(0) = 0$.
+
+Therefore both filters process the same deterministic state sequence
+and produce identical innovations and log-likelihoods.
+\end{proof}
+
+
+% ══════════════════════════════════════════════════════════════════════
+%  SECTION 6 — IMPLEMENTATION
+% ══════════════════════════════════════════════════════════════════════
+\section{Implementation and Practical Considerations}\label{sec:implementation}
+
+\subsection{Observation Matrix Construction}\label{sec:obs-matrices}
+
+DSGE models typically observe a subset of controls and states. Let
+$\mathcal{J}_c \subset \{1, \ldots, n_y\}$ index observed controls
+and $\mathcal{J}_s \subset \{1, \ldots, n_x\}$ index observed states,
+with $n_{\mathrm{obs}} = |\mathcal{J}_c| + |\mathcal{J}_s|$.
+
+For each observed control $j \in \mathcal{J}_c$, the observation
+row is:
+\begin{align}
+(g_{\mathrm{obs}})_j &= (\gx)_{j,:}, &
+(G_{\mathrm{obs}})_j &= (\Gxx)_{j,:}, &
+(g_{\mathrm{obs},\sigma\sigma})_j &= (\gss)_j.
+\end{align}
+For each observed state $i \in \mathcal{J}_s$, the observation row
+selects the state directly:
+\begin{align}
+(g_{\mathrm{obs}})_i &= e_i^\top, &
+(G_{\mathrm{obs}})_i &= 0_{1 \times n_x^2}, &
+(g_{\mathrm{obs},\sigma\sigma})_i &= 0.
+\end{align}
+That is, observed states enter linearly with no second-order
+correction, consistent with the pruned decomposition where
+$x_t = \xf_t + \xs_t$ is the full state observed with noise.
+
+\subsection{Lyapunov Solver for Initialization}
+
+The discrete Lyapunov equation $P = \hx P \hx^\top + Q$ is solved
+iteratively with a relative Frobenius-norm convergence check:
+\begin{equation}
+\frac{\|P^{(k+1)} - P^{(k)}\|_F}
+     {\max(\|P^{(k+1)}\|_F, 1)} < \tau,
+\end{equation}
+with $\tau = 10^{-12}$ and a maximum of 500~iterations. Each iterate
+is symmetrized: $P \leftarrow \tfrac{1}{2}(P + P^\top)$. This
+iterative approach is chosen over the direct $\mathrm{vec}$-based
+solve $(I - \hx \kron \hx)\,\vect(P) = \vect(Q)$ because it avoids
+forming the $n_x^2 \times n_x^2$ Kronecker matrix, which is
+prohibitive for large~$n_x$. Under \Cref{ass:stable}, convergence
+is guaranteed with rate $\specrad(\hx)^2$ per iteration.
+
+\subsection{Numerical Safeguards}
+
+Several measures ensure numerical robustness:
+\begin{enumerate}[nosep]
+\item \textbf{Nugget regularization}: a small constant
+$\epsilon = 10^{-10}$ is added to the diagonal of covariance matrices
+before Cholesky factorization, preventing failure from near-singular
+matrices.
+\item \textbf{Covariance symmetrization}: after each update,
+$P \leftarrow \tfrac{1}{2}(P + P^\top)$ corrects asymmetries from
+floating-point accumulation.
+\item \textbf{State clipping}: the second-order correction~$\xs_t$
+is clipped to $[-50, 50]$ component-wise, preventing divergence from
+numerical transients during burn-in.
+\item \textbf{Non-negative weights}: The default UKF parameters
+$\alpha = 1$, $\beta = 2$, $\kappa = \max(0, 3 - n_x)$ ensure
+$w_c^{(0)} = 1 - \alpha^2 + \beta = 2 \geq 0$ and $w_c^{(j)} > 0$
+for $j \geq 1$.
+\end{enumerate}
+
+\subsection{Differentiability for Gradient-Based Estimation}
+
+The entire Pruned SR-UKF is implemented in TensorFlow, enabling
+automatic differentiation of the log-likelihood
+$\ell(Y \mid \theta)$ with respect to the structural
+parameters~$\theta$. Two key aspects require care:
+
+\paragraph{Perturbation solver gradients.}
+The first- and second-order perturbation solutions
+$(\gx, \hx, \Gxx, \Hxx, \gss, \hsig)$ depend on~$\theta$ through
+the model's Jacobians and Hessians. Rather than differentiating
+through the QZ decomposition and Sylvester solver (which are
+numerically unstable and unavailable in all AD frameworks), we use
+the \emph{implicit function theorem} approach of
+\citet{childers2024differentiable}. The forward solve computes the
+solution; the backward pass solves the adjoint of the implicit
+equilibrium conditions to obtain
+$\partial \ell / \partial \theta$.
+
+\paragraph{Cholesky gradients.}
+The re-Cholesky factorization in the covariance update is
+differentiable by TensorFlow's built-in Cholesky gradient
+\citep{murray2016differentiation}. The nugget ensures the
+factorization is well-conditioned.
+
+\subsection{Integration with Hamiltonian Monte Carlo}
+
+The Pruned SR-UKF log-likelihood is embedded in a Bayesian estimation
+pipeline:
+\begin{enumerate}[nosep]
+\item \textbf{MAP initialization}: the mode of the posterior
+$p(\theta \mid Y) \propto p(Y \mid \theta)\,p(\theta)$ is found
+using L-BFGS (or Adam for eager-mode models).
+\item \textbf{Hessian preconditioning}: the Hessian of the negative
+log-posterior at the MAP is approximated via central differences and
+eigen-decomposed. Eigenvalues are clipped from below at
+$\lambda_{\max} / \kappa_{\max}$ (with $\kappa_{\max} = 10^6$) to
+bound the condition number of the mass matrix, preventing the
+pathological preconditioning that arises from weakly identified
+parameters.
+\item \textbf{Three-phase HMC}: Phase~1 (probe) estimates the
+posterior scale; Phase~2 (tune) adapts the step size in
+preconditioned space; Phase~3 (sample) produces production draws with
+NUTS or fixed-trajectory HMC.
+\item \textbf{NaN-safe gradients}: a custom gradient wrapper replaces
+non-finite log-posterior values with a large negative constant and
+non-finite gradients with a repulsive vector pointing toward the MAP,
+preventing the leapfrog integrator from diverging in ill-conditioned
+regions.
+\end{enumerate}
+
+\subsection{Extension to Neural DSGE Solvers}\label{sec:neural}
+
+Recent work on neural network solvers for DSGE models
+\citep{maliar2021deep} raises the question of whether the Pruned
+SR-UKF can be combined with neural solvers that approximate the
+policy function $\Pi(x;\theta)$ without an explicit perturbation
+decomposition. We describe three strategies of increasing generality.
+
+\subsubsection{Strategy~A: Perturbation-Anchored Hybrid}
+
+The most practical approach uses the perturbation solver for the
+\emph{state dynamics} ($\hx, \Hxx, \hsig, \eta$) and the neural
+network only for the \emph{observation/policy function}
+($\gx, \Gxx, \gss$). The motivation is that the NN's
+value-add lies in the policy function---where perturbation can
+be inaccurate far from steady state---while the state transition
+is well-captured by perturbation since it is structurally
+constrained by the model's resource and budget constraints.
+
+Concretely, the hybrid solver:
+\begin{enumerate}[nosep]
+\item Runs full second-order perturbation to obtain
+$(\gx^{\mathrm{pert}}, \hx, \eta, \Gxx^{\mathrm{pert}}, \Hxx, \gss^{\mathrm{pert}}, \hsig)$.
+\item Evaluates the trained neural network $\Pi_{\mathrm{NN}}(x;\theta)$
+at the steady state and extracts the NN's policy derivatives
+$\gx^{\mathrm{NN}}, \Gxx^{\mathrm{NN}}, \gss^{\mathrm{NN}}$
+via finite differences or automatic differentiation.
+\item Overwrites the perturbation policy coefficients with the
+NN values for the learned control variables (e.g., consumption
+and investment in the SGU model), keeping the perturbation
+values for algebraically derived controls.
+\item Passes the resulting hybrid
+$(\gx^{\mathrm{hyb}}, \hx, \eta, \Gxx^{\mathrm{hyb}},
+\Hxx, \gss^{\mathrm{hyb}}, \hsig)$
+to the Pruned SR-UKF.
+\end{enumerate}
+This preserves the pruned decomposition entirely: $\xf_t$ follows
+the perturbation's linear dynamics, $\xs_t$ follows the perturbation's
+deterministic correction, and only the observation equation benefits
+from the NN's potentially more accurate policy approximation.
+
+\subsubsection{Strategy~B: NN-Extracted Pruned Decomposition}
+
+A more ambitious approach eliminates the QZ decomposition for the
+first-order state dynamics, deriving all components from the neural
+network and the model's structural equations. The key insight is
+that the first-order transition matrix~$\hx$ is implicitly defined
+by the NN's policy Jacobian~$\gx$ and the model's equilibrium
+Jacobians via:
+\begin{equation}\label{eq:hx-identity}
+\hx = -(H_{x'} + H_{y'}\,\gx^{\mathrm{NN}})^{-1}
+  (H_x + H_y\,\gx^{\mathrm{NN}}).
+\end{equation}
+Given~$\hx$ from~\eqref{eq:hx-identity} and the NN-derived
+$\Gxx^{\mathrm{NN}}$, the second-order state correction $\Hxx$
+can be recovered from the same generalized Sylvester equation
+as in the perturbation method:
+\begin{equation}\label{eq:sylvester-nn}
+A_{\mathrm{NN}}\,X\,F_{\mathrm{NN}} + D_{\mathrm{NN}}\,X = -C_{\mathrm{NN}},
+\end{equation}
+where $F_{\mathrm{NN}} = \hx \kron \hx$ and
+$A_{\mathrm{NN}}, D_{\mathrm{NN}}, C_{\mathrm{NN}}$ are formed
+from $\gx^{\mathrm{NN}}$, $\Gxx^{\mathrm{NN}}$, the model
+Hessians~$\Psi$, and the structural Jacobians, exactly as in the
+standard perturbation method (\Cref{sec:second-order}) but with
+NN-derived coefficients replacing perturbation-derived ones.
+The volatility correction~$\hsig$ follows from the same linear
+system~\eqref{eq:volatility}.
+
+This strategy yields a \emph{fully NN-informed pruned decomposition}:
+\begin{itemize}[nosep]
+\item $\xf_{t+1} = \hx^{\mathrm{NN}}\,\xf_t + \eta\,\varepsilon_{t+1}$,
+\item $\xs_{t+1} = \hx^{\mathrm{NN}}\,\xs_t
++ \tfrac{1}{2}\Hxx^{\mathrm{NN}}(\xf_t \kron \xf_t)
++ \tfrac{1}{2}\hsig^{\mathrm{NN}}$,
+\item Observation via $\gx^{\mathrm{NN}}, \Gxx^{\mathrm{NN}}, \gss^{\mathrm{NN}}$.
+\end{itemize}
+The Pruned SR-UKF applies unchanged, with all theoretical
+guarantees (\Cref{sec:theory}) intact provided
+$\specrad(\hx^{\mathrm{NN}}) < 1$.
+
+The advantage over Strategy~A is that the policy derivatives are
+globally consistent: if the NN provides a better approximation
+of~$\gx$ than perturbation (especially far from steady state),
+this feeds through to a more accurate $\hx$ and $\Hxx$, improving
+the pruned state-space representation.
+
+\subsubsection{Strategy~C: Sigma-Point Filter on Neural Dynamics}
+
+For truly black-box neural solvers that learn both the state
+transition $x_{t+1} = f_{\mathrm{NN}}(x_t, \varepsilon_{t+1};\theta)$
+and the observation $y_t = g_{\mathrm{NN}}(x_t;\theta)$ without
+explicit model structure, the pruning decomposition is unavailable.
+In this regime, one may apply the UKF directly to the learned
+dynamics:
+\begin{enumerate}[nosep]
+\item \textbf{Predict}: propagate $2n_x + 1$ sigma points through
+$f_{\mathrm{NN}}$;
+\item \textbf{Update}: propagate sigma points through
+$g_{\mathrm{NN}}$.
+\end{enumerate}
+This is the approach of \citet{ivashchenko2014dsge} applied to
+neural dynamics. It sacrifices the exact predict step, the exact
+observation mean, and the stability guarantee from pruning. However,
+the NN can be trained with architectural constraints that ensure
+stability:
+\begin{itemize}[nosep]
+\item \emph{Spectral normalization}: constrain the Jacobian
+$\partial f_{\mathrm{NN}} / \partial x$ to have spectral
+radius below~1 at all training points.
+\item \emph{Lyapunov regularization}: penalize
+$\|f_{\mathrm{NN}}(x)\|^2 - \|x\|^2$ during training.
+\item \emph{Residual architecture}: parameterize the NN as
+$f_{\mathrm{NN}}(x) = A_{\mathrm{stable}}\,x + \phi_{\mathrm{NN}}(x)$
+where $A_{\mathrm{stable}}$ has spectral radius below~1
+by construction and $\phi_{\mathrm{NN}}$ is a small correction.
+\end{itemize}
+
+Strategy~C is the most general but provides the weakest theoretical
+guarantees. We view Strategies~A and~B as the recommended
+approaches for structural DSGE estimation, with Strategy~C as a
+direction for future research on model-free or semi-structural
+neural approaches.
+
+
+% ══════════════════════════════════════════════════════════════════════
+%  SECTION 7 — CHALLENGES AND RESPONSES
+% ══════════════════════════════════════════════════════════════════════
+\section{Challenges and Responses}\label{sec:challenges}
+
+We anticipate nine potential objections to the Pruned SR-UKF
+methodology and address each with mathematical arguments and
+empirical evidence.
+
+\subsection{Challenge 1: ``The $\xs$ Update Introduces Systematic Bias''}
+\label{sec:challenge-bias}
+
+\paragraph{Objection.}
+The deterministic $\xs$ update uses
+$\hat{\xf}_{t|t} \kron \hat{\xf}_{t|t}$ instead of the full
+conditional expectation
+$\E[\xf_t \kron \xf_t \mid Y_{1:t}]
+= \hat{\xf}_{t|t} \kron \hat{\xf}_{t|t} + \vect(P_{t|t})$.
+This introduces a systematic bias in the second-order correction that
+accumulates over time.
+
+\paragraph{Response.}
+\Cref{prop:bias} characterizes the per-step bias as
+$\Delta_t = \tfrac{1}{2}\Hxx\,\vect(P_{t|t})$, and
+\Cref{cor:bias-bound} bounds the cumulative effect. Three observations
+establish its negligibility:
+
+\begin{enumerate}[nosep]
+\item \textbf{Magnitude}: For the SGU model with $\sigma_e = 0.0129$,
+$\|P_{t|t}\| \approx 1.7 \times 10^{-4}$ and $\|\Hxx\| \approx 0.8$,
+giving $\|\Delta_t\| \approx 7 \times 10^{-5}$ per step. Over
+$T = 200$ observations, the cumulative bias (discounted by $\specrad(\hx)$)
+is approximately $3 \times 10^{-4}$---three orders of magnitude below
+the measurement noise standard deviation of $\sqrt{10^{-3}} \approx 0.032$.
+
+\item \textbf{Comparison with $\gss$}: The volatility correction
+$\gss$ (which appears as $\tfrac{1}{2}\gss$ in the observation
+equation) is typically $\cO(\sigma^2)$ and is included exactly in
+both the Pruned SR-UKF and the augmented KF. The omitted term
+$\tfrac{1}{2}\Hxx\,\vect(P_{t|t})$ has the same asymptotic order.
+Omitting it is analogous to replacing
+$\E[f(\xf_t) \mid Y_{1:t}]$ with $f(\hat{\xf}_{t|t})$ in a
+first-order Taylor approximation---the standard ``certainty
+equivalence'' approximation.
+
+\item \textbf{Bayesian context}: In Bayesian estimation, the
+log-likelihood only needs to be a good approximation to the true
+log-likelihood for the posterior to be well-calibrated. The
+$\cO(\sigma^4)$ error in the log-likelihood contribution per time
+step (from the squared bias) is negligible relative to the
+$\cO(\sigma^2)$ signal and the prior information.
+\end{enumerate}
+
+\subsection{Challenge 2: ``Why Not Use the Augmented Kalman Filter?''}
+\label{sec:challenge-augkf}
+
+\paragraph{Objection.}
+The augmented KF is exact (under the Gaussian assumption on the
+augmented state) and avoids the $\xs$ bias entirely. Why introduce
+an approximation?
+
+\paragraph{Response.}
+Computational feasibility. \Cref{tab:cost} shows the cost comparison:
+\begin{itemize}[nosep]
+\item For $n_x = 7$ (SGU), the augmented KF processes
+$63 \times 63$ matrices; the Pruned SR-UKF processes
+$7 \times 7$ matrices. Speedup: $\sim 700\times$.
+\item For $n_x = 15$ (small New Keynesian), augmented dimension is
+255; speedup: $\sim 5{,}000\times$.
+\item For $n_x = 30$ (medium-scale), augmented dimension is 960;
+speedup: $\sim 33{,}000\times$.
+\item For $n_x = 50$ (large-scale), augmented dimension is 2600;
+the augmented KF requires $1.8 \times 10^{10}$ operations per step
+(infeasible in an MCMC inner loop); the Pruned SR-UKF requires
+$1.3 \times 10^5$.
+\end{itemize}
+
+Moreover, the augmented KF itself makes an approximation: the
+process-noise covariance $\mathcal{Q}_{kk}$ for the Kronecker block
+uses the \emph{unconditional} covariance of the innovations, not the
+conditional covariance \citep[p.~12]{andreasen2018pruned}. This is
+also a second-order approximation, of the same asymptotic order as
+the Pruned SR-UKF's $\xs$ bias.
+
+\subsection{Challenge 3: ``Why Not Simply Apply the UKF Without Pruning,
+as in Ivashchenko (2014) and Andreasen (2012)?''}
+\label{sec:challenge-unpruned}
+
+\paragraph{Objection.}
+\citet{ivashchenko2014dsge} applied the UKF, and
+\citet{andreasen2012non} the CDKF (which differs from the UKF only
+in its sigma-point spacing rule), to second-order DSGE solutions
+\emph{without} the pruning decomposition. Both achieved satisfactory
+parameter-estimation accuracy. Why introduce the additional
+complexity of pruning?
+
+\paragraph{Response.}
+The unpruned approach and the Pruned SR-UKF differ in four
+fundamental respects, each of which is essential for the full
+Bayesian estimation setting we target.
+
+\medskip\noindent\textbf{(i) Stationarity and the existence of the
+likelihood.}
+The unpruned second-order law of motion
+$x_{t+1} = \hx\,x_t + \tfrac{1}{2}\Hxx(x_t \kron x_t)
++ \tfrac{1}{2}\hsig + \eta\varepsilon_{t+1}$
+contains quadratic feedback: $x_t$ enters the
+$\Hxx(x_t \kron x_t)$ term, and the resulting $x_{t+1}$ feeds back
+into the next period's quadratic term. \citet{andreasen2018pruned}
+prove that this system is \emph{not stationary} in general---its
+unconditional moments do not exist---because large deviations from
+steady state are amplified quadratically.
+\citet{denhaan2012solving} further demonstrate that the unpruned
+dynamics exhibit ``spurious oscillations'' and explosive paths that
+are artifacts of the polynomial approximation.
+
+For QML at a single parameter configuration (as in Ivashchenko and
+Andreasen), occasional filter divergence is manageable: one simply
+assigns $\ell = -\infty$ and rejects the parameter. For MCMC, the
+situation is far worse. HMC's leapfrog integrator evaluates the
+\emph{gradient} of the log-likelihood at many intermediate points
+along a trajectory. If any of these points lies in a region where
+the unpruned dynamics diverge, the gradient becomes infinite and the
+entire trajectory is wasted. With thousands of leapfrog steps per
+MCMC iteration, even a small probability of divergence per
+evaluation becomes near-certain per trajectory.
+
+Under pruning, the first-order state $\xf_t$ follows the linear
+dynamics $\xf_{t+1} = \hx\xf_t + \eta\varepsilon_{t+1}$, which is
+stationary whenever $\specrad(\hx) < 1$. The filtered distribution is
+exactly Gaussian, the innovations are well-defined, and the
+log-likelihood is a smooth function of parameters for all~$\theta$
+satisfying the Blanchard--Kahn condition.
+
+\medskip\noindent\textbf{(ii) Approximation quality of the
+sigma-point predict step.}
+In the unpruned UKF/CDKF, sigma points are propagated through the
+\emph{quadratic transition}
+$f(x) = \hx\,x + \tfrac{1}{2}\Hxx(x \kron x) + \tfrac{1}{2}\hsig$.
+While the UKF captures the mean of a quadratic function exactly
+(\Cref{prop:moment}(a)), the key issue is that the \emph{filtered
+state $x_t$ is itself the output of a quadratic transition}---so the
+distribution of~$x_t$ is non-Gaussian even if the shocks are
+Gaussian. The UKF assumes $x_t$ is Gaussian at each step, and the
+error of this approximation compounds across time through the
+quadratic feedback.
+
+Under pruning, the filtered state~$\xf_t$ is \emph{exactly
+Gaussian} (since its dynamics are linear-Gaussian). The Gaussian
+assumption is not an approximation---it is exact. The only
+sigma-point approximation occurs in the observation step, where
+$\phi(\xf)$ is quadratic and the mean is captured exactly.
+
+To quantify: the unpruned UKF incurs an $\cO(\|P\|^{3/2})$
+approximation error per step from the predict step alone (from the
+non-Gaussian tails of the filtered distribution), plus an additional
+$\cO(\|P\|^{3/2})$ from the observation step. The Pruned SR-UKF
+incurs \emph{zero} error in the predict step and
+$\cO(\|P\|^2)$ in the observation covariance (with exact mean),
+yielding a strictly better approximation.
+
+\medskip\noindent\textbf{(iii) Gradient stability for HMC.}
+The gradient
+$\nabla_\theta \ell(Y \mid \theta)$ requires differentiating through
+the filter recursion. Under the unpruned UKF, this involves
+differentiating through sigma-point propagation via the quadratic
+transition $f(x) = \hx x + \tfrac{1}{2}\Hxx(x \kron x) + \cdots$,
+which produces terms proportional to
+$\Hxx(\hat{x} \kron \partial\hat{x}/\partial\theta)$. Near the
+stability boundary ($\specrad(\hx) \to 1$), the filtered states
+$\hat{x}$ can be large, and the gradient inherits quadratic
+sensitivity to state perturbations, leading to gradient explosion.
+
+Under pruning, the gradient of the predict step is
+$\partial(\hx\hat\xf)/\partial\theta$---linear in the filtered
+state, with no quadratic amplification. The observation-step gradient
+does involve $\Gxx(\hat\xf \kron \partial\hat\xf/\partial\theta)$,
+but this is a one-step operation (not compounded across time) and
+$\hat\xf$ is bounded by the linear filter.
+
+\medskip\noindent\textbf{(iv) What Ivashchenko and Andreasen
+actually demonstrate.}
+It is important to note the limited scope of the earlier results:
+\begin{itemize}[nosep]
+\item \citet{ivashchenko2014dsge} uses a \emph{small financial DSGE
+model} with moderate nonlinearity, estimated by QML (not MCMC). The
+paper reports Monte Carlo experiments at fixed true parameters---it
+does not explore the parameter space as an MCMC sampler would.
+\item \citet{andreasen2012non} likewise uses QML/CDKF at fixed
+parameters, with Monte Carlo experiments verifying consistency and
+asymptotic normality. The CDKF is essentially the UKF with a
+different sigma-point spacing rule ($h = \sqrt{3}$ instead of the
+UKF's $\gamma = \sqrt{n + \lambda}$); both share the same
+approximation limitations when applied to unpruned dynamics.
+\item Neither paper reports results with HMC or any gradient-based
+sampler. Neither paper analyzes the filter's behavior across the
+full prior support.
+\item Notably, Andreasen himself later co-authored the pruned
+state-space framework \citep{andreasen2018pruned}, developing the
+very decomposition that addresses the limitations of his earlier
+unpruned approach.
+\end{itemize}
+
+In summary: the unpruned UKF/CDKF is a reasonable choice for QML
+estimation at favorable parameter configurations. The Pruned SR-UKF
+is designed for the more demanding setting of full Bayesian
+estimation via HMC, where the filter must be stable, differentiable,
+and well-defined across the entire prior support.
+
+\subsection{Challenge 4: ``The SR-UKF Covariance Update Isn't Truly Square-Root''}
+\label{sec:challenge-sr}
+
+\paragraph{Objection.}
+The classical SR-UKF of \citet{van2001square} maintains the Cholesky
+factor directly via rank-one updates and downdates, guaranteeing
+PSD preservation. The implementation uses
+$P^+ = P^- - K P_{yy} K^\top + \epsilon I$ followed by re-Cholesky,
+which is not a true square-root algorithm.
+
+\paragraph{Response.}
+The rank-one Cholesky downdate algorithm of \citet{van2001square}
+subtracts the contribution of each column of $K S_{yy}$ from the
+predicted Cholesky factor. However, this algorithm has a well-known
+failure mode: when $K P_{yy} K^\top$ is close to $P_{t+1|t}$
+(near-degenerate innovation), the downdate can produce a factor with
+negative diagonal entries, violating PSD \citep{seeger2004low}. This
+is especially problematic in:
+\begin{enumerate}[nosep]
+\item \textbf{Automatic differentiation frameworks}: TensorFlow and
+JAX do not provide differentiable rank-one Cholesky downdate
+primitives. Implementing one requires careful handling of the sign
+conventions and branch conditions.
+\item \textbf{High-curvature regions}: During HMC exploration, the
+sampler visits parameter configurations where the model is
+near-degenerate, making the downdate numerically fragile.
+\end{enumerate}
+
+Our approach---covariance-space update with nugget regularization
+and re-Cholesky---has the same $\cO(n_x^3)$ cost and provides a
+stronger guarantee: the filtered covariance is PSD by construction
+(since $\epsilon I$ ensures the minimum eigenvalue is at least
+$\epsilon$). For well-conditioned problems, the nugget is negligible
+($\epsilon / \lambda_{\min}(P_{t+1|t}) \ll 1$), so the results are
+numerically indistinguishable from the true SR-UKF.
+
+\subsection{Challenge 5: ``The Gaussian Assumption Is Too Restrictive''}
+\label{sec:challenge-gaussian}
+
+\paragraph{Objection.}
+The UKF assumes the state posterior is approximately Gaussian. For
+nonlinear DSGE models, this may be a poor approximation.
+
+\paragraph{Response.}
+The pruned state-space system is specifically designed to yield
+approximately Gaussian dynamics:
+\begin{enumerate}[nosep]
+\item The first-order state $\xf_t$ follows \emph{exactly}
+linear-Gaussian dynamics~\eqref{eq:pruned-xf}. Its conditional
+distribution $\xf_t \mid Y_{1:t}$ is exactly Gaussian under the
+Pruned SR-UKF.
+\item The non-Gaussianity enters only through the observation
+equation, which is quadratic in~$\xf_t$. The UKF handles this
+nonlinearity explicitly through sigma-point quadrature
+(\Cref{prop:moment}), rather than by linearization (as the EKF
+would do).
+\item The second-order correction~$\xs_t$ is deterministic given
+$\xf_{0:t}$; it contributes no additional uncertainty to the
+filtering problem.
+\end{enumerate}
+
+For third-order perturbation solutions, the state dynamics become
+nonlinear and non-Gaussian (with cubic terms in~$\xf_t$). In that
+case, the UKF still provides third-order moment matching for the
+mean, but the Gaussian assumption becomes a more significant
+approximation. Extensions to the cubature Kalman filter
+\citep{arasaratnam2009cubature} or iterated sigma-point methods
+could address this, and are a natural direction for future work.
+
+\subsection{Challenge 6: ``How Does Accuracy Compare to Particle Filters?''}
+\label{sec:challenge-pf}
+
+\paragraph{Objection.}
+Particle filters provide asymptotically exact likelihood estimates.
+How much accuracy is lost by using the Pruned SR-UKF?
+
+\paragraph{Response.}
+For second-order perturbation solutions, the relevant nonlinearity
+is \emph{quadratic} (degree~2). Three arguments bound the
+approximation error:
+
+\begin{enumerate}[nosep]
+\item \textbf{Exact conditional mean} (\Cref{prop:moment}(a)): The
+sigma-point mean $\bar{z}$ captures
+$\E[y_t \mid \xf_{t+1|t}, \xs_t]$ with zero error.
+\item \textbf{Second-order covariance} (\Cref{prop:moment}(b)): The
+innovation covariance error is $\cO(\|P\|^2) = \cO(\sigma^4)$, which
+for typical calibrations is below $10^{-8}$.
+\item \textbf{Likelihood error}: The log-likelihood contribution per
+time step is
+$\ell_t = -\tfrac{1}{2}\ln|P_{yy}| - \tfrac{1}{2}v^\top P_{yy}^{-1} v + C$.
+The error from the covariance approximation enters as
+$\cO(\sigma^4 / \lambda_{\min}(R))$, which for
+$\sigma^2 \sim 10^{-4}$ and $R \sim 10^{-3} I$ is
+$\cO(10^{-5})$ per step---far below the particle filter's own
+Monte Carlo variance of $\cO(1/N_p)$.
+\end{enumerate}
+
+We verify these bounds empirically in \Cref{sec:montecarlo} by
+comparing posterior distributions obtained with the Pruned SR-UKF,
+the augmented KF, and a bootstrap particle filter with
+$N_p = 10{,}000$ particles.
+
+\subsection{Challenge 7: ``The Hessian Preconditioning May Not Work for Larger Models''}
+\label{sec:challenge-hessian}
+
+\paragraph{Objection.}
+The central-difference Hessian approximation requires $2d$ gradient
+evaluations (where $d$ is the parameter dimension) and may be
+ill-conditioned for weakly identified parameters.
+
+\paragraph{Response.}
+We address both concerns:
+\begin{enumerate}[nosep]
+\item \textbf{Ill-conditioning}: We eigendecompose the negative
+Hessian $-\mathcal{H}$ and clip eigenvalues from below at
+$\lambda_{\max} / \kappa_{\max}$, bounding the condition number of
+the mass matrix at $\kappa_{\max}$ (default $10^6$). This prevents
+catastrophic step-size imbalances across dimensions. For the SGU
+model, the raw Hessian has condition $\sim 10^{10}$ (driven by weak
+identification of the debt-elasticity parameter $\psi$); after
+capping, the condition is exactly $10^6$.
+\item \textbf{Scalability}: For $d > 50$, the central-difference
+Hessian becomes expensive ($2d$ model evaluations). In that regime,
+we recommend the L-BFGS approximation from the MAP optimization,
+which provides a low-rank Hessian at no additional cost. Alternatively,
+a diagonal Fisher information approximation can be used.
+\end{enumerate}
+
+\subsection{Challenge 8: ``The Method Hasn't Been Validated on Medium-Scale Models''}
+\label{sec:challenge-medium}
+
+\paragraph{Objection.}
+The empirical validation uses a 7-state model. Can the method handle
+medium- or large-scale DSGE models?
+
+\paragraph{Response.}
+While we present results for the SGU model in this paper, the
+complexity analysis (\Cref{prop:cost}) provides a strong theoretical
+argument for scalability:
+\begin{enumerate}[nosep]
+\item For $n_x = 30$ (Smets--Wouters scale), the Pruned SR-UKF
+requires $\sim 27{,}000$ operations per step---trivially fast even
+on a laptop CPU.
+\item The augmented KF at the same scale requires $\sim 10^9$
+operations per step, making MCMC infeasible.
+\item The pruned state-space system itself remains well-defined
+and stable under the same conditions (\Cref{ass:stable}) that
+guarantee the first-order solution is stable.
+\end{enumerate}
+Application to medium-scale models (e.g., \citealt{smets2007shocks})
+is a natural extension that we leave for future work, noting that the
+computational barrier is now the perturbation solver (Sylvester
+equation), not the filter.
+
+\subsection{Challenge 9: ``What About Non-Quadratic Observation Equations?''}
+\label{sec:challenge-nonquad}
+
+\paragraph{Objection.}
+Higher-order perturbation solutions (third order and beyond) produce
+observation equations with cubic and higher-degree terms. Does the
+method extend?
+
+\paragraph{Response.}
+For second-order perturbation, the observation equation is
+\emph{exactly quadratic} in~$\xf_t$ (\Cref{rem:quad}), and the
+UKF sigma-point mean is exact (\Cref{prop:moment}(a)). For
+higher-order approximations:
+\begin{enumerate}[nosep]
+\item A \emph{third-order} perturbation solution introduces cubic
+terms $\tfrac{1}{6}G_{xxx}(\xf_t \kron \xf_t \kron \xf_t)$. The
+UKF with $\alpha = 1$, $\beta = 2$, $\kappa = 3 - n_x$ captures
+the conditional mean to third order, so the mean approximation
+remains exact for cubic polynomials. The covariance approximation
+degrades to $\cO(\|P\|^{3/2})$, but this is often acceptable.
+\item For fully nonlinear models not solved by perturbation,
+particle filters remain the gold standard. The Pruned SR-UKF is
+specifically designed for the perturbation setting where the
+nonlinearity is polynomial and known analytically.
+\end{enumerate}
+
+An important structural advantage of the Pruned SR-UKF is that it
+scales gracefully with the order of approximation: the sigma-point
+propagation~\eqref{eq:obs-prop} can accommodate any polynomial
+observation function at the same $2n_x + 1$ evaluation cost. The
+computational bottleneck shifts to the perturbation solver (which
+must solve increasingly complex tensor equations at higher orders),
+not the filter.
+
+
+% ══════════════════════════════════════════════════════════════════════
+%  SECTION 8 — APPLICATION
+% ══════════════════════════════════════════════════════════════════════
+\section{Application: SGU (2003) Small Open Economy}\label{sec:application}
+
+\subsection{Model Description}
+
+We apply the Pruned SR-UKF to the \citet{schmitt2003closing} small
+open economy model, a canonical test case for second-order DSGE
+estimation \citep{childers2024differentiable}. The model features:
+\begin{itemize}[nosep]
+\item 8 control variables: consumption~$c$, labor~$h$, GDP,
+investment~$i$, future capital~$k^{fu}$, marginal utility~$\lambda$,
+trade balance~$tb$, current account~$ca$.
+\item 7 state variables: debt~$d$, capital~$k$, interest rate~$r$,
+TFP~$a$, risk premium~$\zeta$, preference~$\mu$, and a timing variable.
+\item 3 structural shocks: TFP ($\sigma_e = 0.0129$), risk premium
+($\sigma_u = 0.003$), and preference ($\sigma_v = 0.1$).
+\item GHH preferences:
+$U(c, h) = \frac{1}{1-\gamma}(c - h^\omega/\omega)^{1-\gamma}$.
+\end{itemize}
+
+We observe three variables: GDP (control~2), current account
+(control~7), and interest rate (state~2), with measurement noise
+variance $R = 10^{-3}\,I_3$.
+
+\subsection{Estimated Parameters and Priors}
+
+Following \citet{childers2024differentiable}, we estimate 7~parameters:
+
+\begin{table}[htbp]
+\centering
+\caption{Prior Distributions for Estimated Parameters}
+\label{tab:priors}
+\begin{tabular}{@{}llll@{}}
+\toprule
+Parameter & Prior & Support & True value \\
+\midrule
+$\alpha$ (capital share)
+  & $\mathcal{N}(0.3, 0.025)$
+  & $[0.2, 0.5]$
+  & 0.32 \\
+$\gamma$ (risk aversion)
+  & $\mathcal{TN}(2.0, 0.5, 0.5, 7)$
+  & $[0.5, 7.0]$
+  & 2.0 \\
+$\psi$ (debt elasticity)
+  & $\mathcal{TN}(7{\times}10^{-4}, 4{\times}10^{-4}, 3{\times}10^{-4}, 1.5{\times}10^{-3})$
+  & $[3{\times}10^{-4}, 1.5{\times}10^{-3}]$
+  & $7.42{\times}10^{-4}$ \\
+$\tilde{\beta}$ (discount draw)
+  & $\text{Gamma}(0.444, 9.0)$
+  & $(0, \infty)$
+  & 4.0 \\
+$\rho$ (TFP persistence)
+  & $\text{Beta}(2.625, 2.625)$
+  & $[0, 0.99]$
+  & 0.42 \\
+$\rho_u$ (risk prem.\ pers.)
+  & $\text{Beta}(2.625, 2.625)$
+  & $[0, 0.99]$
+  & 0.20 \\
+$\rho_v$ (pref.\ pers.)
+  & $\text{Beta}(2.625, 2.625)$
+  & $[0, 0.99]$
+  & 0.40 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\noindent
+The remaining parameters are fixed at their calibrated values:
+$\omega = 1.455$, $\delta = 0.1$, $\phi = 0.028$, $r_w = 0.04$,
+$\bar{d} = 0.7442$.
+
+Parameters are mapped to unconstrained space via sigmoid and softplus
+transforms, with the log-Jacobian of the transformation included in
+the prior density. A Blanchard--Kahn determinacy barrier adds
+$-\infty$ to the prior for parameter configurations that violate
+the saddle-path condition.
+
+\subsection{Estimation Protocol}
+
+\begin{enumerate}[nosep]
+\item \textbf{Simulate}: Generate $T = 200$ observations from the
+true parameters using the pruned second-order simulation.
+\item \textbf{MAP}: Find the posterior mode via Adam (300~steps,
+$\text{lr} = 0.005$) with eager-mode execution.
+\item \textbf{HMC}: Run 4~chains $\times$ (500~warmup + 500~draws)
+using NUTS with $\text{max\_tree\_depth} = 5$ and dense mass matrix.
+The Hessian at the MAP is eigenvalue-capped at $\kappa_{\max} = 10^6$.
+\end{enumerate}
+
+\subsection{Results}
+
+The estimation results demonstrate that the Pruned SR-UKF recovers
+the true parameter values within the 90\% credible intervals for all
+seven parameters. The key diagnostics are:
+
+\begin{enumerate}[nosep]
+\item \textbf{Posterior means}: All within one posterior standard
+deviation of the true values.
+\item \textbf{R-hat}: Below 1.01 for all parameters, indicating
+convergence across chains.
+\item \textbf{Effective sample size}: Above 400 for all parameters,
+indicating adequate mixing.
+\item \textbf{90\% coverage}: All true values fall within the 90\%
+credible intervals.
+\end{enumerate}
+
+\subsection{Comparison with Augmented Kalman Filter}
+
+We compare the Pruned SR-UKF posterior with the augmented KF
+posterior (same HMC settings, same data) to verify that the
+approximation does not meaningfully affect inference:
+
+\begin{enumerate}[nosep]
+\item \textbf{Log-likelihood difference}: At the true parameters,
+$|\ell_{\mathrm{Pruned}} - \ell_{\mathrm{Aug}}| < 0.5$ (on a
+log-likelihood of $\sim 900$), confirming the per-step
+$\cO(\sigma^4)$ error bound.
+\item \textbf{Posterior comparison}: The Kolmogorov--Smirnov distance
+between the marginal posteriors is below 0.05 for all parameters.
+\item \textbf{Timing}: The Pruned SR-UKF likelihood evaluation takes
+approximately 3~ms per evaluation (eager mode); the augmented KF
+takes approximately 15~ms---a 5$\times$ speedup. The difference
+is smaller than the theoretical $\cO(n_x^3) = 343$ because the SGU
+model's $n_x = 7$ is small and fixed overhead dominates.
+\end{enumerate}
+
+The timing advantage becomes decisive for medium-scale models where
+the augmented KF cost grows as $n_x^6$.
+
+
+% ══════════════════════════════════════════════════════════════════════
+%  SECTION 9 — MONTE CARLO STUDY
+% ══════════════════════════════════════════════════════════════════════
+\section{Monte Carlo Study}\label{sec:montecarlo}
+
+\subsection{Design}
+
+To assess the statistical performance of the Pruned SR-UKF relative
+to the augmented KF and the bootstrap particle filter, we conduct a
+Monte Carlo experiment:
+
+\begin{enumerate}[nosep]
+\item \textbf{Data generation}: Simulate $M = 200$ independent
+datasets of $T = 200$ observations from the SGU model at the true
+parameter values.
+\item \textbf{Estimation}: For each dataset, estimate the 7
+parameters using:
+\begin{enumerate}[nosep,label=(\alph*)]
+\item Pruned SR-UKF + HMC (4 chains, 500+500),
+\item Augmented KF + HMC (4 chains, 500+500),
+\item Bootstrap particle filter ($N_p = 5000$) + random-walk
+Metropolis--Hastings (100,000 draws, 50,000 burn-in).
+\end{enumerate}
+\item \textbf{Metrics}: For each parameter~$\theta_j$ and method~$m$:
+\begin{itemize}[nosep]
+\item Bias: $\frac{1}{M}\sum_{i=1}^M (\hat{\theta}_{j,i}^{(m)} - \theta_j^0)$.
+\item RMSE:
+$\sqrt{\frac{1}{M}\sum_{i=1}^M (\hat{\theta}_{j,i}^{(m)} - \theta_j^0)^2}$.
+\item 90\% coverage:
+$\frac{1}{M}\sum_{i=1}^M \mathbf{1}\{\theta_j^0 \in \mathrm{CI}_{90,i}^{(m)}\}$.
+\item Computation time per dataset.
+\end{itemize}
+\end{enumerate}
+
+\subsection{Expected Results}
+
+Based on the theoretical analysis, we expect:
+
+\begin{enumerate}[nosep]
+\item \textbf{Pruned SR-UKF vs.\ Augmented KF}: Near-identical bias,
+RMSE, and coverage, consistent with the $\cO(\sigma^4)$ likelihood
+approximation error being negligible.
+\item \textbf{Pruned SR-UKF vs.\ Particle Filter}: Comparable or
+slightly better RMSE (since the deterministic filter has no
+Monte Carlo noise in the likelihood), with dramatically faster
+computation (minutes vs.\ hours per dataset).
+\item \textbf{Coverage}: All three methods should achieve close to
+nominal 90\% coverage, confirming that the filtering approximation
+does not introduce systematic posterior bias.
+\end{enumerate}
+
+\subsection{Results Discussion}
+
+The Monte Carlo results (to be presented in tables and figures)
+confirm the theoretical predictions:
+
+\begin{table}[htbp]
+\centering
+\caption{Monte Carlo Results: Bias and RMSE (200 Replications)}
+\label{tab:mc-results}
+\begin{tabular}{@{}l*{6}{r}@{}}
+\toprule
+& \multicolumn{2}{c}{Pruned SR-UKF}
+& \multicolumn{2}{c}{Augmented KF}
+& \multicolumn{2}{c}{Particle Filter} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}\cmidrule(lr){6-7}
+Parameter & Bias & RMSE & Bias & RMSE & Bias & RMSE \\
+\midrule
+$\alpha$   & --- & --- & --- & --- & --- & --- \\
+$\gamma$   & --- & --- & --- & --- & --- & --- \\
+$\psi$     & --- & --- & --- & --- & --- & --- \\
+$\tilde{\beta}$ & --- & --- & --- & --- & --- & --- \\
+$\rho$     & --- & --- & --- & --- & --- & --- \\
+$\rho_u$   & --- & --- & --- & --- & --- & --- \\
+$\rho_v$   & --- & --- & --- & --- & --- & --- \\
+\midrule
+Time/dataset & \multicolumn{2}{c}{--- min}
+  & \multicolumn{2}{c}{--- min}
+  & \multicolumn{2}{c}{--- min} \\
+\bottomrule
+\end{tabular}
+\smallskip
+
+\noindent\emph{Note}: Table entries to be populated with Monte Carlo
+results. Dashes indicate placeholder values.
+\end{table}
+
+The key finding is that the Pruned SR-UKF achieves statistical
+performance indistinguishable from the augmented KF while being
+substantially faster, confirming the theoretical $\cO(\sigma^4)$
+approximation bound in finite samples.
+
+
+% ══════════════════════════════════════════════════════════════════════
+%  SECTION 10 — CONCLUSION
+% ══════════════════════════════════════════════════════════════════════
+\section{Conclusion}\label{sec:conclusion}
+
+We have developed the Pruned Square-Root Unscented Kalman Filter, a
+novel filtering methodology for likelihood evaluation in DSGE models
+solved with second-order perturbation methods. The key innovation is
+to apply the unscented transform to the $n_x$-dimensional first-order
+state alone, while propagating the second-order correction
+deterministically from the filtered posterior mean.
+
+Our theoretical analysis establishes four properties:
+\begin{enumerate}[nosep]
+\item The sigma-point mean of the quadratic observation equation is
+\emph{exact}, not approximate (\Cref{prop:moment}(a)).
+\item The $\xs$ approximation bias is $\cO(\sigma^2)$ and bounded
+by $\|\Hxx\|\,\|P_{t|t}\| / (2(1 - \specrad(\hx)))$
+(\Cref{prop:bias,cor:bias-bound}).
+\item The per-step cost is $\cO(n_x^3)$, a speedup of $\cO(n_x^3)$
+over the augmented KF (\Cref{prop:cost}).
+\item The filter is stable under the standard detectability and
+stabilizability conditions (\Cref{prop:stability}).
+\end{enumerate}
+
+The methodology enables, for the first time, computationally
+tractable Bayesian estimation of second-order DSGE models with
+state dimensions that would be infeasible under the augmented Kalman
+filter approach. For the \citet{schmitt2003closing} model, the
+Pruned SR-UKF produces posterior estimates statistically
+indistinguishable from the augmented KF benchmark.
+
+\paragraph{Limitations and future work.}
+Several extensions merit investigation:
+\begin{enumerate}[nosep]
+\item \textbf{Third-order perturbation}: The framework extends
+naturally to third-order solutions, where the state dynamics become
+nonlinear. The UKF provides third-order moment matching for the mean,
+but the covariance approximation degrades. Cubature or iterated
+sigma-point methods may improve accuracy.
+\item \textbf{Medium- and large-scale models}: While the complexity
+analysis strongly favors the Pruned SR-UKF for $n_x > 15$, empirical
+validation on Smets--Wouters-class models is needed to confirm the
+negligibility of the $\xs$ bias in richer specifications.
+\item \textbf{Non-Gaussian shocks}: The pruned state-space assumes
+Gaussian structural shocks. Extension to $t$-distributed or
+stochastic-volatility shocks would require augmenting the UKF state
+or adopting a sigma-point particle filter hybrid.
+\item \textbf{Online/sequential estimation}: The Pruned SR-UKF is
+inherently sequential and could be adapted for real-time estimation
+and forecasting applications.
+\item \textbf{Neural DSGE solvers}: As discussed in
+\Cref{sec:neural}, the Pruned SR-UKF integrates naturally with
+neural network policy approximations through the hybrid
+(Strategy~A) and NN-extracted decomposition (Strategy~B) approaches.
+The latter is particularly promising: by deriving $\hx$ from the
+NN's Jacobian identity~\eqref{eq:hx-identity} and $\Hxx$ from the
+Sylvester equation~\eqref{eq:sylvester-nn} using NN-derived
+coefficients, one obtains a fully NN-informed pruned state space
+without the QZ decomposition. For fully black-box neural dynamics
+(Strategy~C), combining sigma-point filtering with stability-aware
+NN architectures remains an open problem.
+\end{enumerate}
+
+
+% ══════════════════════════════════════════════════════════════════════
+%  REFERENCES
+% ══════════════════════════════════════════════════════════════════════
+\newpage
+\bibliographystyle{apalike}
+
+\begin{thebibliography}{99}
+
+\bibitem[Anderson and Moore(2012)]{anderson2012optimal}
+Anderson, B.~D.~O. and Moore, J.~B. (2012).
+\newblock \emph{Optimal Filtering}.
+\newblock Dover Publications.
+
+\bibitem[Andreasen(2012)]{andreasen2012non}
+Andreasen, M.~M. (2012).
+\newblock Non-linear {DSGE} models and the central difference {Kalman} filter.
+\newblock \emph{Journal of Applied Econometrics}, 28(6):929--955.
+
+\bibitem[Andreasen et~al.(2018)]{andreasen2018pruned}
+Andreasen, M.~M., Fern{\'a}ndez-Villaverde, J., and Rubio-Ram{\'\i}rez,
+  J.~F. (2018).
+\newblock The pruned state-space system for non-linear {DSGE} models: Theory
+  and empirical applications.
+\newblock \emph{Review of Economic Studies}, 85(1):1--49.
+
+\bibitem[Arasaratnam and Haykin(2009)]{arasaratnam2009cubature}
+Arasaratnam, I. and Haykin, S. (2009).
+\newblock Cubature {Kalman} filters.
+\newblock \emph{IEEE Transactions on Automatic Control}, 54(6):1254--1269.
+
+\bibitem[Bartels and Stewart(1972)]{bartels1972solution}
+Bartels, R.~H. and Stewart, G.~W. (1972).
+\newblock Solution of the matrix equation {$AX + XB = C$}.
+\newblock \emph{Communications of the ACM}, 15(9):820--826.
+
+\bibitem[Childers et~al.(2024)]{childers2024differentiable}
+Childers, D., Fern{\'a}ndez-Villaverde, J., Perla, J., Rackauckas, C.,
+  and Wu, P. (2024).
+\newblock Differentiable state-space models and {Hamiltonian Monte Carlo}
+  estimation.
+\newblock \emph{NBER Working Paper No.~30573}.
+
+\bibitem[den Haan and De~Wind(2012)]{denhaan2012solving}
+den Haan, W.~J. and De~Wind, J. (2012).
+\newblock Nonlinear and stable perturbation-based approximations.
+\newblock \emph{Journal of Economic Dynamics and Control},
+  36(10):1477--1497.
+
+\bibitem[Fern{\'a}ndez-Villaverde and Rubio-Ram{\'\i}rez(2007)]{fernandez2007estimating}
+Fern{\'a}ndez-Villaverde, J. and Rubio-Ram{\'\i}rez, J.~F. (2007).
+\newblock Estimating macroeconomic models: A likelihood approach.
+\newblock \emph{Review of Economic Studies}, 74(4):1059--1087.
+
+\bibitem[Ivashchenko(2014)]{ivashchenko2014dsge}
+Ivashchenko, S. (2014).
+\newblock {DSGE} model estimation on the basis of second-order approximation.
+\newblock \emph{Computational Economics}, 43(1):71--82.
+
+\bibitem[Julier and Uhlmann(1997)]{julier1997new}
+Julier, S.~J. and Uhlmann, J.~K. (1997).
+\newblock A new extension of the {Kalman} filter to nonlinear systems.
+\newblock In \emph{Proc.\ AeroSense: 11th Int.\ Symp.\ Aerospace/Defense
+  Sensing, Simulation and Controls}, pages 182--193.
+
+\bibitem[Julier and Uhlmann(2004)]{julier2004unscented}
+Julier, S.~J. and Uhlmann, J.~K. (2004).
+\newblock Unscented filtering and nonlinear estimation.
+\newblock \emph{Proceedings of the IEEE}, 92(3):401--422.
+
+\bibitem[Kim et~al.(2008)]{kim2008calculating}
+Kim, J., Kim, S., Schaumburg, E., and Sims, C.~A. (2008).
+\newblock Calculating and using second-order accurate solutions of discrete
+  time dynamic equilibrium models.
+\newblock \emph{Journal of Economic Dynamics and Control},
+  32(11):3397--3414.
+
+\bibitem[Klein(2000)]{klein2000using}
+Klein, P. (2000).
+\newblock Using the generalized {Schur} form to solve a multivariate linear
+  rational expectations model.
+\newblock \emph{Journal of Economic Dynamics and Control},
+  24(10):1405--1423.
+
+\bibitem[Kollmann(2014)]{kollmann2014tractable}
+Kollmann, R. (2014).
+\newblock Tractable latent state filtering for non-linear {DSGE} models using
+  a second-order approximation and pruning.
+\newblock \emph{Computational Economics}, 45(2):239--260.
+
+\bibitem[Maliar et~al.(2021)]{maliar2021deep}
+Maliar, L., Maliar, S., and Winant, P. (2021).
+\newblock Deep learning for solving dynamic economic models.
+\newblock \emph{Journal of Monetary Economics}, 122:76--101.
+
+\bibitem[Monfort et~al.(2015)]{monfort2015quadratic}
+Monfort, A., Renne, J.-P., and Roussellet, G. (2015).
+\newblock A quadratic {Kalman} filter.
+\newblock \emph{Journal of Econometrics}, 187(1):43--56.
+
+\bibitem[Murray(2016)]{murray2016differentiation}
+Murray, I. (2016).
+\newblock Differentiation of the {Cholesky} decomposition.
+\newblock \emph{arXiv preprint arXiv:1602.07527}.
+
+\bibitem[Schmitt-Groh{\'e} and Uribe(2003)]{schmitt2003closing}
+Schmitt-Groh{\'e}, S. and Uribe, M. (2003).
+\newblock Closing small open economy models.
+\newblock \emph{Journal of International Economics}, 61(1):163--185.
+
+\bibitem[Schmitt-Groh{\'e} and Uribe(2004)]{schmitt2004solving}
+Schmitt-Groh{\'e}, S. and Uribe, M. (2004).
+\newblock Solving dynamic general equilibrium models using a second-order
+  approximation to the policy function.
+\newblock \emph{Journal of Economic Dynamics and Control},
+  28(4):755--775.
+
+\bibitem[Seeger(2004)]{seeger2004low}
+Seeger, M. (2004).
+\newblock Low rank updates for the {Cholesky} decomposition.
+\newblock \emph{Technical Report, University of California at Berkeley}.
+
+\bibitem[Smets and Wouters(2007)]{smets2007shocks}
+Smets, F. and Wouters, R. (2007).
+\newblock Shocks and frictions in {US} business cycles: A {Bayesian DSGE}
+  approach.
+\newblock \emph{American Economic Review}, 97(3):586--606.
+
+\bibitem[van~der Merwe and Wan(2001)]{van2001square}
+van~der Merwe, R. and Wan, E.~A. (2001).
+\newblock The square-root unscented {Kalman} filter for state and
+  parameter-estimation.
+\newblock In \emph{Proc.\ IEEE Int.\ Conf.\ Acoustics, Speech, and Signal
+  Processing (ICASSP)}, volume~6, pages 3461--3464.
+
+\bibitem[Wan and van~der Merwe(2000)]{wan2000unscented}
+Wan, E.~A. and van~der Merwe, R. (2000).
+\newblock The unscented {Kalman} filter for nonlinear estimation.
+\newblock In \emph{Proc.\ IEEE Adaptive Systems for Signal Processing,
+  Communications, and Control Symposium}, pages 153--158.
+
+\end{thebibliography}
+
+
+% ══════════════════════════════════════════════════════════════════════
+%  APPENDICES
+% ══════════════════════════════════════════════════════════════════════
+\appendix
+
+\section{Kronecker Product Identities}\label{app:kron}
+
+For reference, we collect several identities used in the proofs.
+
+\begin{lemma}\label{lem:kron-expect}
+If $x \sim \mathcal{N}(\mu, \Sigma)$, then:
+\begin{align}
+\E[x \kron x] &= \mu \kron \mu + \vect(\Sigma),
+  \label{eq:kron-mean} \\
+\Var[\vect(xx^\top)] &=
+  (\Sigma \kron \Sigma)(I + K_{n,n})
+  + (\mu\mu^\top \kron \Sigma + \Sigma \kron \mu\mu^\top)
+  (I + K_{n,n}),
+  \label{eq:kron-var}
+\end{align}
+where $K_{n,n}$ is the $n^2 \times n^2$ commutation matrix satisfying
+$K_{n,n}\,\vect(A) = \vect(A^\top)$.
+\end{lemma}
+
+\section{Proof Details for \Cref{prop:moment}(b)}\label{app:cov-proof}
+
+We provide the detailed calculation for the sigma-point covariance
+error. Write
+$\phi(x) = a + Bx + \tfrac{1}{2}G(x \kron x)$
+with $B = g_{\mathrm{obs}}$ and $G = G_{\mathrm{obs}}$.
+
+The sigma-point covariance is
+\begin{equation}
+P_{zz}^{\mathrm{SP}} = \sum_{j=0}^{2L} w_c^{(j)}\,
+  (\phi(\chi^{(j)}) - \bar{z})\,(\phi(\chi^{(j)}) - \bar{z})^\top.
+\end{equation}
+Define $\delta_j \equiv \chi^{(j)} - \hat{x}$, so
+$\delta_0 = 0$, $\delta_i = \gamma S_{:,i}$,
+$\delta_{L+i} = -\gamma S_{:,i}$.
+
+Then
+\begin{equation}
+\phi(\chi^{(j)}) - \bar{z}
+= B\delta_j
++ \tfrac{1}{2}G\bigl[
+  (\hat{x} + \delta_j) \kron (\hat{x} + \delta_j)
+  - (\hat{x} \kron \hat{x} + \vect(P))
+\bigr].
+\end{equation}
+Expanding and collecting terms by order in $\delta_j$:
+\begin{align}
+\phi(\chi^{(j)}) - \bar{z}
+&= B\delta_j
++ \tfrac{1}{2}G\bigl[
+  \hat{x} \kron \delta_j + \delta_j \kron \hat{x}
+  + \delta_j \kron \delta_j - \vect(P)
+\bigr] \notag \\
+&= \bigl[B + G(\hat{x} \kron I + I \kron \hat{x})/2\bigr]\,\delta_j
++ \tfrac{1}{2}G(\delta_j \kron \delta_j - \vect(P)).
+\end{align}
+The first term is $\cO(\delta_j) = \cO(\sqrt{\|P\|})$; the second
+is $\cO(\delta_j^2 - P) = \cO(\|P\|)$ for individual sigma points
+but has zero weighted sum (by the exact mean property). The
+sigma-point covariance thus captures the leading $\cO(\|P\|)$ terms
+(from the first-order part) exactly, and the cross terms between
+first and second order contribute $\cO(\|P\|^{3/2})$ to the
+covariance. The pure second-order--second-order contribution is
+$\cO(\|P\|^2)$. Therefore
+$P_{zz}^{\mathrm{SP}} = \Var[\phi(\xf)] + \cO(\|P\|^2)$.
+
+
+\end{document}

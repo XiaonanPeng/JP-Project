@@ -1,0 +1,2584 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{colortbl}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{natbib}
+\usepackage{longtable}
+\usepackage{listings}
+
+\lstset{
+	language=Python,
+	basicstyle=\ttfamily\small,
+	keywordstyle=\color{blue}\bfseries,
+	commentstyle=\color{green!50!black},
+	stringstyle=\color{red!70!black},
+	showstringspaces=false,
+	breaklines=true,
+	frame=single,
+	backgroundcolor=\color{gray!5},
+	numbers=left,
+	numberstyle=\tiny\color{gray},
+	numbersep=5pt,
+	xleftmargin=2em,
+	framexleftmargin=1.5em,
+}
+
+\newtheorem{proposition}{Proposition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{corollary}{Corollary}
+\newtheorem{remark}{Remark}
+\newtheorem{example}{Example}
+\theoremstyle{definition}
+\newtheorem{definition}{Definition}
+\newtheorem{assumption}{Assumption}
+
+\definecolor{passgreen}{rgb}{0.0,0.5,0.0}
+\definecolor{failred}{rgb}{0.7,0.0,0.0}
+\definecolor{codebg}{rgb}{0.95,0.95,0.95}
+\definecolor{codecolor}{rgb}{0.1,0.1,0.6}
+\definecolor{warncolor}{rgb}{0.7,0.4,0.0}
+
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\Var}{\mathrm{Var}}
+\newcommand{\Cov}{\mathrm{Cov}}
+\newcommand{\tr}{\mathrm{tr}}
+\newcommand{\diag}{\mathrm{diag}}
+\newcommand{\btheta}{\boldsymbol{\theta}}
+\newcommand{\bpsi}{\boldsymbol{\psi}}
+\newcommand{\beps}{\boldsymbol{\varepsilon}}
+\newcommand{\bx}{\mathbf{x}}
+\newcommand{\by}{\mathbf{y}}
+\newcommand{\bc}{\mathbf{c}}
+\newcommand{\be}{\mathbf{e}}
+\newcommand{\bz}{\mathbf{z}}
+\newcommand{\bu}{\mathbf{u}}
+\newcommand{\bp}{\mathbf{p}}
+\newcommand{\bv}{\mathbf{v}}
+\newcommand{\bw}{\mathbf{w}}
+\newcommand{\code}[1]{\texttt{\color{codecolor}#1}}
+\newcommand{\warn}[1]{\textbf{\color{warncolor}Pitfall:} #1}
+
+\title{Neural Network Solvers for Bayesian Estimation\\
+	of New Keynesian DSGE Models:\\[6pt]
+	\large A Self-Contained Treatment from Microfoundations\\
+	to Hamiltonian Monte Carlo\\[6pt]
+	\normalsize With Line-by-Line Code Correspondence}
+\author{Chak Wong}
+\date{March 2026}
+
+\begin{document}
+	\maketitle
+	
+	\begin{abstract}
+		This document provides a complete, self-contained treatment of Bayesian estimation of Dynamic Stochastic General Equilibrium (DSGE) models using neural network solvers.
+		Starting from microeconomic first principles, we derive the three-equation New Keynesian model from the optimisation problems of households, firms, and the central bank.
+		We develop the perturbation solution method at both first and second order, explain the Kalman and Unscented Kalman filters for likelihood evaluation, and describe Hamiltonian Monte Carlo for posterior sampling.
+		We then introduce a neural network that approximates the model's policy function conditioned on structural parameters, enabling rapid repeated evaluation during Bayesian inference.
+		
+		The central technical challenge is ensuring that the neural network's gradients with respect to structural parameters are sufficiently smooth for gradient-based sampling.
+		We identify two complementary ingredients for a production-quality neural DSGE solver.
+		First, \textbf{canonical reparameterisation} ($\psi = M^{-1}(\theta - \theta_{\mathrm{mode}})$, where $M = \Sigma^{1/2}$ is the posterior covariance square root) decorrelates parameters and equalises gradient scales, reducing HMC divergences 32-fold even without explicit gradient regularisation.
+		Second, \textbf{perturbation gradient regularisation} directly trains the neural network's parameter derivatives to match the known-smooth perturbation gradients.
+		Combined, these achieve zero HMC divergences with $\hat{R} = 1.018$ and ESS $= 283$.
+		
+		A key new finding is that Sobolev regularisation alone---without any perturbation gradient target---passes all HMC diagnostics under canonical reparameterisation (0 divergences, $\hat{R} = 1.035$), broadening the applicability of neural DSGE solvers to models without perturbation solutions.
+		
+		We systematically evaluate 30 training configurations spanning activation functions, architectures, regularisation strategies, multi-objective optimisation, parameter-space normalisation, and canonical reparameterisation.
+		Several approaches from the physics-informed neural networks (PINNs) and multi-task learning literatures---Dual-Cone Gradient Descent, SIREN activations, spectral normalisation, gradient normalisation, and parameter-scale weighting---are analysed in detail, with precise explanations of why each fails in the DSGE context, confirmed under both the original $\theta$-space and the reparameterised $\psi$-space.
+		
+		The software includes an Epstein--Zin NK model extension that separates risk aversion from intertemporal substitution, demonstrating that the UKF is necessary when the excess risk aversion parameter $\delta = \gamma - 1/\psi$ is large.
+		
+		All prior distributions, parameter transforms, hyperparameter settings, and experimental protocols are documented in full, enabling exact replication by third parties.
+		Four appendices provide line-by-line documentation of the accompanying software, connect implementation details to equations, and include an \emph{engineering addendum} (pitfalls and bug post-mortems) written for readers with minimal systems background.
+		
+		Every equation in this document has been verified against the accompanying Python implementation, and code references are provided throughout.
+		No prior knowledge of DSGE models, Kalman filtering, Hamiltonian Monte Carlo, or neural network training is assumed.
+		Every algorithm is derived from first principles.
+	\end{abstract}
+	
+	\tableofcontents
+	\newpage
+	
+	%======================================================================
+	%  PART I: FOUNDATIONS
+	%======================================================================
+	
+	\part{Economic and Mathematical Foundations}
+	
+	%======================================================================
+	\section{Introduction}
+	\label{sec:intro}
+	%======================================================================
+	
+	\subsection{What This Document Is About}
+	
+	Central banks around the world use mathematical models of the economy to forecast inflation, evaluate policy options, and communicate decisions.
+	The dominant class of such models is called \emph{Dynamic Stochastic General Equilibrium} (DSGE) models.
+	The name describes three features: ``dynamic'' because agents make decisions over time, ``stochastic'' because random shocks hit the economy, and ``general equilibrium'' because all markets clear simultaneously.
+	
+	Estimating the parameters of a DSGE model---for example, how aggressively the central bank raises interest rates in response to inflation---requires fitting the model to observed data.
+	\emph{Bayesian inference} is the standard method: it combines prior beliefs about parameter values with information from the data to produce a \emph{posterior distribution}---a probability distribution over parameters given the observations.
+	
+	This posterior distribution cannot be computed in closed form because the relationship between parameters and data involves solving a nonlinear expectational model (the DSGE model itself) and then filtering the observations through a state-space model.
+	Instead, we draw samples from the posterior using \emph{Markov chain Monte Carlo} (MCMC) methods, specifically \emph{Hamiltonian Monte Carlo} (HMC).
+	Each MCMC step requires:
+	\begin{enumerate}
+		\item proposing a new parameter value,
+		\item solving the DSGE model at that parameter value to obtain the ``policy function'' (how economic variables respond to shocks),
+		\item feeding the policy function into a filter (Kalman or Unscented Kalman) to compute how likely the observed data is under that parameterisation,
+		\item accepting or rejecting the proposal.
+	\end{enumerate}
+	Since HMC may require thousands of such evaluations, the computational bottleneck is step~2: solving the model.
+	
+	The innovation in this project is to replace step~2 with a \emph{neural network} that has been trained, once and offline, to approximate the model's solution for any parameter value in a relevant region.
+	After training, each evaluation in step~2 is a simple forward pass through the network---orders of magnitude faster than re-solving the model from scratch.
+	
+	However, this introduces a subtle but critical challenge.
+	HMC is a \emph{gradient-based} sampler: it uses the gradient of the log-posterior with respect to parameters to guide its exploration.
+	These gradients flow backward through the filter and then through the neural network's policy function.
+	If the neural network's gradients with respect to the structural parameters are noisy or inaccurate---even if the function values themselves are accurate---the HMC sampler produces ``divergent transitions'' (numerical instabilities) and fails to explore the posterior correctly.
+	
+	This document explains every component of this pipeline, from the economic theory underlying the DSGE model to the specific neural network training techniques that ensure gradient quality.
+	Two key discoveries drive the design: first, \emph{canonical reparameterisation} of the parameter space dramatically improves gradient quality by decorrelating parameters and equalising gradient scales; second, \emph{perturbation gradient regularisation} provides a specific smooth target for the neural network's parameter derivatives.
+	
+	\subsection{The Four-Stage Pipeline}
+	
+	\begin{enumerate}
+		\item \textbf{Model} (Sections~\ref{sec:micro}--\ref{sec:is_derivation}): Define the economic model---the IS curve, New Keynesian Phillips Curve, and Taylor rule---by deriving them from the optimisation problems of households, firms, and the central bank.
+		\item \textbf{Solve} (Sections~\ref{sec:perturbation_1}--\ref{sec:neural_solver}): Find the \emph{policy function} that maps the current economic state (productivity and monetary policy shocks) to outcomes (output, inflation, interest rates).
+		Three methods: first-order perturbation (analytical), second-order perturbation (analytical with curvature), and neural network approximation (learned).
+		\item \textbf{Filter} (Section~\ref{sec:filtering}): Given a candidate policy function and observed data, compute the likelihood $p(Y|\btheta)$---the probability of the observed data under parameter vector $\btheta$.
+		The Kalman filter handles linear models; the Unscented Kalman Filter handles nonlinear ones.
+		\item \textbf{Estimate} (Section~\ref{sec:estimation}): Sample from the posterior $p(\btheta|Y) \propto p(Y|\btheta)p(\btheta)$ using HMC.
+	\end{enumerate}
+	
+	\subsection{The Three Software Components}
+	
+	\paragraph{\code{dsgeEZ.py}: Core framework.}
+	Backend abstraction layer (\code{BackendRegistry}, \code{TensorFlowBackend}), model classes (\code{SmallNKModel}, \code{EpsteinZinNKModel}, \code{SGUEstimable}), four filters (\code{KalmanFilter}, \code{AugmentedKalmanFilter}, \code{SquareRootUKF}, \code{PrunedSquareRootUKF}), and three estimators (\code{MAPEstimator}, \code{HMCEstimator}, \code{MultiChainHMC}).
+	Also provides MCMC diagnostics (\code{compute\_rhat}, \code{compute\_ess}, \code{mcmc\_summary}).
+	The backend abstraction enables future porting to JAX or PyTorch, while all current computation uses TensorFlow with \code{float64} precision.
+	
+	\paragraph{\code{dsgeneural.py}: Neural solver.}
+	Classes include \code{NeuralNKSolver} (fixed parameters, for testing), \code{ConditionedNeuralNKSolver} (parameter-conditioned NK), \code{NeuralSGUSolver} (SGU model with Hall--Hoffarth constraints: NN outputs only $(c,i)$; other controls implied), and \code{NeuralSGUSolverNaive} (full eight-control baseline).
+	Training pipeline includes supervised pretraining with cosine LR decay, early stopping, and curriculum learning; All-in-One residual minimisation; and multiple gradient regularisation strategies (Sobolev, perturbation gradient, gradient-consistency).
+	Network architectures: \code{NeuralPolicyNetwork}, \code{ScalablePolicyNetwork} (dimension-adaptive with optional residual connections), \code{SIRENNetwork}.
+	Three coefficient extraction methods: finite-difference stencil (\code{solve\_fd}), autodiff Jacobian with FD Hessian (\code{solve\_autodiff}), and ridge-regression Hessian (\code{solve\_regression}, the default).
+	Supports canonical reparameterisation (\code{reparam=True}, the default) for decorrelated $\psi$-space training.
+	
+	\paragraph{\code{tutorial\_neural\_dsge.py}: End-to-end tutorial.}
+	Compares three estimation approaches: (A)~linear model with Kalman filter, (B)~2nd-order perturbation with UKF, (C)~neural solver with UKF.
+	Case~C uses a three-stage pipeline: quick perturbation posterior for theta-samples, train reparameterised neural solver, then full multi-chain HMC.
+	
+	\subsection{Notation Conventions}
+	
+	Scalars are denoted by lowercase italic ($y$, $\pi$, $i$).
+	Vectors are lowercase bold ($\bx$, $\btheta$).
+	Matrices are uppercase italic ($A$, $P$).
+	$\E_t[\cdot]$ denotes the conditional expectation given all information available at time $t$.
+	The Kronecker product $x \otimes x$ produces a vector of all pairwise products (defined fully in Section~\ref{sec:kronecker}).
+	All variables denote \emph{log-deviations from deterministic steady state} unless stated otherwise---that is, $y_t = 0$ means output is at its steady-state level.
+	Throughout, $\btheta$ denotes structural parameters in constrained space, $u$ denotes unconstrained parameters (for HMC), and $\psi$ denotes canonically reparameterised parameters (for neural network training).
+	
+	\subsection{Parameter Vector and Code Mapping}
+	\label{sec:param_mapping}
+	
+	The NK model has 9 structural parameters stored in the vector $\btheta$ with the following index convention, matching \code{SmallNKModel.NAMES} and the array ordering in all code:
+	
+	\begin{center}
+		\begin{tabular}{cclcll}
+			\toprule
+			Index & Code name & Math & Domain & Description & Code variable \\
+			\midrule
+			0 & \code{beta} & $\beta$ & $(0.9, 1)$ & Discount factor & \code{theta[0]} \\
+			1 & \code{kappa} & $\kappa$ & $(0, \infty)$ & NKPC slope & \code{theta[1]} \\
+			2 & \code{sigma\_c} & $\sigma_c$ & $(0, \infty)$ & Inverse EIS (CRRA) & \code{theta[2]} \\
+			3 & \code{phi\_pi} & $\phi_\pi$ & $(1, \infty)$ & Taylor rule: inflation & \code{theta[3]} \\
+			4 & \code{phi\_y} & $\phi_y$ & $(0, \infty)$ & Taylor rule: output & \code{theta[4]} \\
+			5 & \code{rho\_a} & $\rho_a$ & $(-1, 1)$ & Productivity persistence & \code{theta[5]} \\
+			6 & \code{rho\_v} & $\rho_v$ & $(-1, 1)$ & Policy shock persistence & \code{theta[6]} \\
+			7 & \code{sig\_a} & $\sigma_a$ & $(0, \infty)$ & Productivity shock std & \code{theta[7]} \\
+			8 & \code{sig\_v} & $\sigma_v$ & $(0, \infty)$ & Policy shock std & \code{theta[8]} \\
+			\bottomrule
+		\end{tabular}
+	\end{center}
+	
+	The default test values used in \code{tutorial\_neural\_dsge.py} (\code{THETA\_TRUE}) and \code{dsgeneural.py} (\code{main}) are:
+	\begin{equation}\label{eq:theta_true}
+		\btheta_{\mathrm{true}} = (0.99, 0.30, 1.00, 1.50, 0.125, 0.90, 0.50, 0.05, 0.05).
+	\end{equation}
+	The tutorial uses $\sigma_c = 1.0$ and $\sigma_a = \sigma_v = 0.05$; the \code{dsgeneural.py} test harness uses $\sigma_c = 2.0$ and $\sigma_a = \sigma_v = 0.10$.
+	
+	The software also includes an \code{EpsteinZinNKModel} with 10 parameters (adding $\gamma$ and $\psi$ for recursive preferences, replacing $\sigma_c$); see Section~\ref{sec:ez_model}.
+	
+	%======================================================================
+	\section{Mathematical Preliminaries}
+	\label{sec:math_prelim}
+	%======================================================================
+	
+	This section collects the mathematical tools used throughout the document.
+	Readers familiar with these topics may skim or skip ahead.
+	
+	\subsection{Constrained Dynamic Optimisation and the Lagrangian}
+	\label{sec:lagrangian}
+	
+	Much of macroeconomics involves agents choosing sequences of actions over time to maximise an objective subject to constraints.
+	The standard tool is the \emph{Lagrangian method}.
+	
+	Suppose a household wants to maximise $f(C, N)$ subject to a constraint $g(C, N) \leq 0$.
+	The Lagrangian is:
+	\begin{equation}\label{eq:lagrangian}
+		\mathcal{L} = f(C, N) - \lambda \, g(C, N),
+	\end{equation}
+	where $\lambda \geq 0$ is the \emph{Lagrange multiplier} (also called the ``shadow price''---it measures how much the objective improves if the constraint is relaxed by one unit).
+	At the optimum, $\partial \mathcal{L}/\partial C = 0$ and $\partial \mathcal{L}/\partial N = 0$.
+	
+	In the dynamic setting, the household faces a constraint at \emph{every} time period $t = 0, 1, 2, \ldots$, so we have a separate multiplier $\lambda_t$ for each period.
+	The infinite-horizon Lagrangian is:
+	\begin{equation}\label{eq:dynamic_lagrangian}
+		\mathcal{L} = \E_0 \sum_{t=0}^{\infty} \beta^t \bigl[U(C_t, N_t) - \lambda_t \cdot g_t(C_t, N_t, B_t, \ldots)\bigr].
+	\end{equation}
+	Taking the first-order condition (FOC) with respect to $C_t$ and $B_t$ (the bond holding), and then eliminating $\lambda_t$ between consecutive periods, yields the \emph{Euler equation}---the fundamental optimality condition relating today's marginal utility to tomorrow's expected marginal utility.
+	
+	\subsection{The Euler Equation: Economic Intuition}
+	
+	The Euler equation captures a simple but powerful idea: \emph{at the optimum, the household is indifferent between consuming a little more today and saving that amount for tomorrow.}
+	
+	If the household consumes one more unit today, the gain in utility is the \emph{marginal utility of consumption today}, $U'(C_t)$.
+	If instead the household saves that unit (lending it at gross interest rate $1 + i_t$, adjusting for inflation $1 + \pi_{t+1}$), the gain is the \emph{expected discounted marginal utility tomorrow}:
+	\begin{equation}
+		\beta(1+i_t) \, \E_t\!\left[\frac{U'(C_{t+1})}{1+\pi_{t+1}}\right].
+	\end{equation}
+	At the optimum, these must be equal:
+	\begin{equation}\label{eq:euler_intuition}
+		U'(C_t) = \beta(1+i_t) \, \E_t\!\left[\frac{U'(C_{t+1})}{1+\pi_{t+1}}\right].
+	\end{equation}
+	If the right-hand side were larger, the household would want to save more (consuming less today, more tomorrow); if smaller, it would want to save less.
+	Only at equality is there no incentive to adjust.
+	
+	\subsection{AR(1) Processes}
+	\label{sec:ar1}
+	
+	Many economic shocks are modelled as \emph{autoregressive processes of order 1} (AR(1)).
+	The idea is that today's shock depends on yesterday's shock plus a random innovation:
+	\begin{equation}\label{eq:ar1_def}
+		x_t = \rho \, x_{t-1} + \sigma \, \varepsilon_t, \qquad \varepsilon_t \overset{\text{i.i.d.}}{\sim} \mathcal{N}(0, 1).
+	\end{equation}
+	The parameter $\rho$ controls \emph{persistence}: when $\rho$ is close to 1, shocks die out slowly; when $\rho$ is close to 0, each period's value is almost entirely determined by the current innovation.
+	The condition $|\rho| < 1$ ensures \emph{stationarity}---the process does not explode or drift to infinity.
+	
+	Key properties used throughout:
+	\begin{align}
+		\E_t[x_{t+1}] &= \rho \, x_t, \label{eq:ar1_forecast}\\
+		\Var(x_t) &= \frac{\sigma^2}{1 - \rho^2} \quad \text{(unconditional variance)}. \label{eq:ar1_var}
+	\end{align}
+	Property~\eqref{eq:ar1_forecast} follows from $\E_t[\varepsilon_{t+1}] = 0$.
+	Property~\eqref{eq:ar1_var} comes from iterating $\Var(x_t) = \rho^2 \Var(x_{t-1}) + \sigma^2$ to its fixed point.
+	
+	Equation~\eqref{eq:ar1_var} is used in \code{\_compute\_domain\_bounds} and \code{NeuralNKSolver.train} to set the sampling domain for neural network training: the state grid covers $\pm 3.5 \times \sigma/\sqrt{1 - \rho^2}$, capturing 99.95\% of the stationary distribution.
+	
+	\subsection{Log-Linearisation}
+	\label{sec:loglin}
+	
+	DSGE models involve nonlinear equations (e.g., $C_t^{-\sigma_c}$, products like $C_t \cdot P_t$).
+	\emph{Log-linearisation} approximates these around the steady state using a first-order Taylor expansion in logs.
+	
+	Define the \emph{log-deviation} $\hat{x}_t = \log(X_t/\bar{X})$, where $\bar{X}$ is the steady-state value.
+	Then $X_t = \bar{X} \exp(\hat{x}_t) \approx \bar{X}(1 + \hat{x}_t)$ for small deviations.
+	Useful identities:
+	\begin{align}
+		X_t^{-\sigma_c} &\approx \bar{X}^{-\sigma_c}(1 - \sigma_c \hat{x}_t), \\
+		X_t \cdot Y_t &\approx \bar{X}\bar{Y}(1 + \hat{x}_t + \hat{y}_t), \\
+		X_t / Y_t &\approx (\bar{X}/\bar{Y})(1 + \hat{x}_t - \hat{y}_t).
+	\end{align}
+	
+	After log-linearisation, the model becomes a system of linear expectational difference equations, which can be solved analytically (Section~\ref{sec:perturbation_1}).
+	Throughout this document, all variables without overbars ($y_t$, $\pi_t$, etc.) are log-deviations from steady state.
+	
+	\subsection{Kronecker Products}
+	\label{sec:kronecker}
+	
+	The \emph{Kronecker product} (or \emph{tensor product}) of two vectors produces a vector containing all pairwise products of their elements.
+	For $x = (a, v)^\top$:
+	\begin{equation}\label{eq:kron_2d}
+		x \otimes x = \begin{pmatrix} a \\ v \end{pmatrix} \otimes \begin{pmatrix} a \\ v \end{pmatrix} = \begin{pmatrix} a^2 \\ av \\ va \\ v^2 \end{pmatrix} \in \R^4.
+	\end{equation}
+	
+	The reason we use Kronecker products is that a \emph{second-order} Taylor expansion of a function $f(x)$ around the origin takes the form:
+	\begin{equation}
+		f(x) \approx f(0) + \underbrace{J \cdot x}_{\text{linear}} + \frac{1}{2} \underbrace{H \cdot (x \otimes x)}_{\text{quadratic}},
+	\end{equation}
+	where $J$ is the Jacobian (matrix of first derivatives) and $H$ is the Hessian reshaped into a matrix that multiplies the Kronecker product.
+	This is just the multivariate Taylor expansion written in a compact matrix form.
+	
+	In code, the Kronecker product is computed as \code{np.outer(x, x).ravel()} (in \code{simulate}) or \code{x[:, :, None] * x[:, None, :]} reshaped to \code{[-1, ns**2]} (in batched training loops).
+	The 4 columns of $G_{xx}$ and $H_{xx}$ correspond to $(a \otimes a, \; a \otimes v, \; v \otimes a, \; v \otimes v)$ in this order.
+	
+	\subsection{Bayes' Theorem}
+	\label{sec:bayes_prelim}
+	
+	Bayes' theorem is the foundation of Bayesian inference.
+	Given observed data $Y$ and parameters $\btheta$:
+	\begin{equation}\label{eq:bayes}
+		\underbrace{p(\btheta | Y)}_{\text{posterior}} = \frac{\overbrace{p(Y | \btheta)}^{\text{likelihood}} \times \overbrace{p(\btheta)}^{\text{prior}}}{\underbrace{p(Y)}_{\text{evidence}}}.
+	\end{equation}
+	
+	The \emph{prior} $p(\btheta)$ encodes our beliefs about the parameters before seeing the data (e.g., ``the discount factor is probably close to 0.99'').
+	The \emph{likelihood} $p(Y|\btheta)$ measures how probable the observed data is under parameter value $\btheta$.
+	The \emph{posterior} $p(\btheta|Y)$ is the updated belief after seeing the data.
+	The \emph{evidence} $p(Y) = \int p(Y|\btheta)p(\btheta)\,d\btheta$ is a normalising constant that does not depend on $\btheta$ and is extremely difficult to compute in high dimensions.
+	
+	Since the evidence is a constant, we write:
+	\begin{equation}\label{eq:bayes_prop}
+		p(\btheta | Y) \propto p(Y | \btheta) \times p(\btheta).
+	\end{equation}
+	This proportionality is sufficient for MCMC sampling, which only requires the ratio of posterior densities at different parameter values (the normalising constant cancels).
+	
+	In our pipeline, the likelihood $p(Y|\btheta)$ is computed by the Kalman or Unscented Kalman filter (Section~\ref{sec:filtering}), and the prior is specified in unconstrained space (Section~\ref{sec:transforms}).
+	
+	\subsection{Why Markov Chain Monte Carlo?}
+	\label{sec:mcmc_intro}
+	
+	The posterior $p(\btheta|Y)$ is a 9-dimensional distribution with no closed-form expression.
+	We cannot compute posterior means, credible intervals, or other summaries analytically.
+	Instead, we generate a sequence of \emph{samples} $\btheta^{(1)}, \btheta^{(2)}, \ldots, \btheta^{(N)}$ from this distribution and approximate:
+	\begin{equation}
+		\E[\btheta | Y] \approx \frac{1}{N} \sum_{i=1}^N \btheta^{(i)}, \qquad \Var[\btheta | Y] \approx \frac{1}{N-1}\sum_{i=1}^N (\btheta^{(i)} - \bar{\btheta})^2.
+	\end{equation}
+	
+	\emph{Markov chain Monte Carlo} (MCMC) generates these samples by constructing a Markov chain whose stationary distribution is the target posterior.
+	The simplest version, the \emph{Metropolis--Hastings algorithm}, works as follows:
+	\begin{enumerate}
+		\item Start at some $\btheta^{(0)}$.
+		\item \textbf{Propose}: draw $\btheta^* \sim q(\cdot | \btheta^{(i)})$ from a proposal distribution (e.g., a Gaussian centred at the current value).
+		\item \textbf{Accept/Reject}: compute the acceptance probability
+		\begin{equation}
+			\alpha = \min\!\left(1, \frac{p(\btheta^*|Y) \, q(\btheta^{(i)}|\btheta^*)}{p(\btheta^{(i)}|Y) \, q(\btheta^*|\btheta^{(i)})}\right)
+		\end{equation}
+		and set $\btheta^{(i+1)} = \btheta^*$ with probability $\alpha$, otherwise $\btheta^{(i+1)} = \btheta^{(i)}$.
+	\end{enumerate}
+	
+	The problem with simple Metropolis--Hastings using a random-walk proposal ($q(\btheta^*|\btheta) = \mathcal{N}(\btheta, \epsilon^2 I)$) is that it explores the parameter space very slowly.
+	Small step sizes $\epsilon$ give high acceptance rates but move slowly; large step sizes move fast but proposals are usually rejected because they land in low-probability regions.
+	In 9 dimensions, this trade-off becomes severe.
+	
+	Hamiltonian Monte Carlo (Section~\ref{sec:hmc}) solves this problem by using gradient information to make large, directed proposals that are almost always accepted.
+	
+	\subsection{Neural Networks: A Brief Primer}
+	\label{sec:nn_primer}
+	
+	A \emph{feedforward neural network} is a parameterised function $f_{\bpsi}: \R^d \to \R^m$ composed of alternating linear transformations and nonlinear activations.
+	For a network with $L$ hidden layers:
+	\begin{align}
+		h_0 &= x \quad \text{(input)}, \\
+		h_\ell &= \phi(W_\ell \, h_{\ell-1} + b_\ell), \quad \ell = 1, \ldots, L, \\
+		f_{\bpsi}(x) &= W_{L+1} \, h_L + b_{L+1} \quad \text{(output, no activation)},
+	\end{align}
+	where $W_\ell$ are weight matrices, $b_\ell$ are bias vectors, and $\phi$ is the activation function.
+	The collection of all weights and biases is $\bpsi = \{W_1, b_1, \ldots, W_{L+1}, b_{L+1}\}$.
+	
+	Common activation functions include:
+	\begin{align}
+		\text{ReLU}(z) &= \max(0, z) & & \text{(not differentiable at 0)}, \\
+		\tanh(z) &= \frac{e^z - e^{-z}}{e^z + e^{-z}} & & \text{(smooth, } C^\infty\text{)}, \\
+		\text{sigmoid}(z) &= \frac{1}{1 + e^{-z}} & & \text{(smooth, output in (0,1))}.
+	\end{align}
+	
+	The \emph{universal approximation theorem} states that a sufficiently wide single-hidden-layer network can approximate any continuous function on a compact set to arbitrary accuracy.
+	In practice, deeper networks with moderate width are more efficient.
+	
+	\paragraph{Training.}
+	The network parameters $\bpsi$ are found by minimising a \emph{loss function} $\mathcal{L}(\bpsi)$ using gradient descent:
+	\begin{equation}
+		\bpsi \leftarrow \bpsi - \alpha \nabla_{\bpsi} \mathcal{L}(\bpsi),
+	\end{equation}
+	where $\alpha$ is the \emph{learning rate}.
+	The gradient $\nabla_{\bpsi}\mathcal{L}$ is computed by the \emph{backpropagation algorithm}, which is just the chain rule applied systematically through the network layers.
+	Modern implementations use \emph{automatic differentiation} (autodiff), which computes exact derivatives (not finite differences) at machine precision.
+	
+	\paragraph{Adam optimiser.}
+	Adam \citep{kingma2015adam} is a variant of gradient descent that maintains running averages of the gradient (first moment $m$) and its square (second moment $v$), and uses these to adapt the step size for each parameter:
+	\begin{align}
+		m_t &= \beta_1 m_{t-1} + (1-\beta_1) g_t, \\
+		v_t &= \beta_2 v_{t-1} + (1-\beta_2) g_t^2, \\
+		\bpsi_t &= \bpsi_{t-1} - \alpha \frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \epsilon},
+	\end{align}
+	where $g_t = \nabla_{\bpsi}\mathcal{L}$, $\hat{m}_t = m_t/(1-\beta_1^t)$, $\hat{v}_t = v_t/(1-\beta_2^t)$ are bias-corrected estimates, and $\beta_1 = 0.9$, $\beta_2 = 0.999$, $\epsilon = 10^{-8}$ are standard defaults.
+	Parameters with large gradients get smaller effective step sizes, and vice versa, which helps when different parameters have different scales.
+	
+	\paragraph{Cosine learning rate decay.}
+	Instead of using a fixed learning rate $\alpha$, the learning rate is reduced during training following a cosine schedule:
+	\begin{equation}
+		\alpha_t = \alpha_{\min} + \frac{1}{2}(\alpha_{\max} - \alpha_{\min})\left(1 + \cos\left(\frac{t}{T}\pi\right)\right),
+	\end{equation}
+	where $t$ is the current epoch, $T$ is the total number of epochs, $\alpha_{\max}$ is the initial learning rate, and $\alpha_{\min}$ is the final learning rate.
+	This starts at $\alpha_{\max}$, smoothly decays to $\alpha_{\min}$ (typically 0 or $10^{-6}$), and helps the optimiser settle into a good minimum.
+	
+	\paragraph{Weight decay.}
+	Adding a penalty $\lambda_{\mathrm{wd}} \|\bpsi\|^2$ to the loss function discourages large weights, which reduces overfitting and improves the smoothness of the learned function.
+	Equivalently, the gradient update becomes $\bpsi \leftarrow (1 - \alpha\lambda_{\mathrm{wd}})\bpsi - \alpha \nabla_{\bpsi}\mathcal{L}$.
+	
+	\paragraph{Gradient clipping.}
+	If the gradient norm $\|\nabla_{\bpsi}\mathcal{L}\|$ exceeds a threshold $G_{\max}$, the gradient is rescaled: $g \leftarrow g \cdot G_{\max}/\|g\|$.
+	This prevents catastrophically large updates that can destabilise training.
+	In our code, $G_{\max} = 10$.
+	
+	\subsection{Latin Hypercube Sampling}
+	\label{sec:lhs}
+	
+	When sampling points to train the neural network, we want good coverage of the input space.
+	Simple random sampling can leave large gaps, especially in high dimensions.
+	\emph{Latin Hypercube Sampling} (LHS) provides much more uniform coverage.
+	
+	The idea is simple.
+	Suppose we want $N$ points in $[0,1]^d$.
+	For each dimension $j$, divide $[0,1]$ into $N$ equal bins.
+	Then randomly assign each of the $N$ points to a different bin in each dimension, and place the point uniformly within its bin.
+	
+	Formally: for point $i$ in dimension $j$:
+	\begin{equation}
+		x_{ij} = \frac{\pi_j(i) - 1 + U_{ij}}{N}, \qquad U_{ij} \sim \text{Uniform}(0,1),
+	\end{equation}
+	where $\pi_j$ is a random permutation of $\{1, \ldots, N\}$, independent for each dimension $j$.
+	
+	The result is that the projection of the sample onto any single dimension is exactly uniform (one point per bin), while the joint distribution provides good $d$-dimensional coverage.
+	LHS is used in three places in the code: \code{\_lhs\_state\_grid} generates state-space training points; \code{\_lhs\_gaussian} generates Gaussian shock vectors $\varepsilon$ by transforming LHS uniform samples through the inverse normal CDF $\varepsilon = \Phi^{-1}(x_{\text{LHS}})$; and parameter sampling in \code{\_sample\_theta} uses LHS mapped through the inverse normal CDF to the inflated posterior Gaussian.
+	
+	\subsection{Multi-Objective Optimisation Background}
+	\label{sec:multiobj_bg}
+	
+	Training the neural solver involves minimising a composite loss $\mathcal{L} = \sum_k \lambda_k \mathcal{L}_k$ comprising several terms: the AiO Euler residual, Sobolev regularisation, perturbation gradient matching, and weight decay.
+	Each term has its own gradient with respect to the network weights:
+	\begin{equation}
+		g_k = \nabla_{\bpsi} \mathcal{L}_k, \qquad k = 1, \ldots, K.
+	\end{equation}
+	The standard approach simply sums these: $g = \sum_k \lambda_k g_k$.
+	Several alternative strategies from the multi-task learning and physics-informed neural networks (PINNs) literatures have been proposed when the loss terms ``conflict''---that is, when reducing one loss increases another.
+	We will describe and analyse these alternatives in Section~\ref{sec:failed}.
+	
+	Two key concepts from convex geometry are needed to understand these alternatives.
+	
+	\paragraph{Cones and dual cones.}
+	The \emph{conic hull} of a set of vectors $\{v_1, \ldots, v_K\}$ is the set of all non-negative linear combinations:
+	\begin{equation}
+		\mathrm{cone}(v_1, \ldots, v_K) = \Bigl\{\sum_{k=1}^K \alpha_k v_k \;\Big|\; \alpha_k \geq 0\Bigr\}.
+	\end{equation}
+	The \emph{dual cone} of a set $S$ is the set of all vectors that form non-negative inner products with every vector in $S$:
+	\begin{equation}\label{eq:dual_cone_def}
+		S^* = \{w \in \R^d : w^\top v \geq 0 \;\;\forall\, v \in S\}.
+	\end{equation}
+	Geometrically, $S^*$ is the set of directions that ``do not oppose'' any direction in $S$.
+	If $S$ consists of a single vector $v$, then $S^*$ is the half-space $\{w : w^\top v \geq 0\}$ (all directions within 90 degrees of $v$).
+	If $S = \{v_1, v_2\}$ and $v_1^\top v_2 > 0$ (the vectors roughly agree), then $S^*$ is a wide cone; if $v_1^\top v_2 < 0$ (the vectors oppose each other), $S^*$ is narrow or empty.
+	
+	\paragraph{Projection onto the dual cone.}
+	Given a vector $g$ and a set $S$, the \emph{projection} of $g$ onto $S^*$ is the closest point in $S^*$ to $g$:
+	\begin{equation}
+		\mathrm{proj}_{S^*}(g) = \arg\min_{w \in S^*} \|w - g\|^2.
+	\end{equation}
+	If $g$ is already in $S^*$ (i.e., $g^\top v \geq 0$ for all $v \in S$), then the projection is $g$ itself---no modification is needed.
+	If $g \notin S^*$ (i.e., $g$ opposes at least one vector in $S$), the projection removes the opposing component.
+	Computing this projection requires solving a quadratic programme, which for two vectors reduces to a simple formula (Section~\ref{sec:dcgd_alg}).
+	
+	\subsection{Eigendecomposition and Matrix Square Roots}
+	\label{sec:eigen_sqrt}
+	
+	The canonical reparameterisation (Section~\ref{sec:reparam}) relies on the eigendecomposition of the posterior covariance matrix.
+	Given a symmetric positive-definite matrix $\Sigma \in \R^{d \times d}$, its eigendecomposition is:
+	\begin{equation}
+		\Sigma = V \Lambda V^\top, \qquad \Lambda = \diag(\lambda_1, \ldots, \lambda_d), \qquad V^\top V = I,
+	\end{equation}
+	where $\lambda_j > 0$ are the eigenvalues and $V$ contains the corresponding orthonormal eigenvectors.
+	
+	The \emph{matrix square root} is:
+	\begin{equation}\label{eq:matrix_sqrt}
+		M = \Sigma^{1/2} = V \Lambda^{1/2} V^\top, \qquad \Lambda^{1/2} = \diag(\sqrt{\lambda_1}, \ldots, \sqrt{\lambda_d}),
+	\end{equation}
+	satisfying $M M^\top = \Sigma$.  The inverse square root is $M^{-1} = V \Lambda^{-1/2} V^\top$.
+	
+	In the code, the eigendecomposition is computed using \code{np.linalg.eigh}, and the matrix $M$ used for reparameterisation is stored as $M = V \Lambda^{1/2}$ (without the trailing $V^\top$), giving $M M^\top = V \Lambda V^\top = \Sigma$ as required.
+	
+	
+	%======================================================================
+	\section{Microfoundations of the New Keynesian Model}
+	\label{sec:micro}
+	%======================================================================
+	
+	The New Keynesian model is built up from three blocks: a representative household that decides how much to consume and work, a continuum of firms that set prices, and a central bank that sets interest rates.
+	We derive each block from first principles.
+	
+	\subsection{The Representative Household}
+	\label{sec:household}
+	
+	We assume a single ``representative household'' that stands in for the average behaviour of all households in the economy.
+	This household makes two decisions each period: how much to consume ($C_t$) and how much to work ($N_t$).
+	It derives utility from consumption and disutility from labour.
+	
+	The household maximises the expected sum of discounted lifetime utility:
+	\begin{equation}\label{eq:utility}
+		\E_0 \sum_{t=0}^{\infty} \beta^t \left[\frac{C_t^{1 - \sigma_c}}{1 - \sigma_c} - \chi \frac{N_t^{1 + \varphi}}{1 + \varphi}\right],
+	\end{equation}
+	where $C_t$ is consumption, $N_t$ is hours worked, $\beta \in (0,1)$ is the discount factor, $\sigma_c > 0$ is the coefficient of relative risk aversion (CRRA), $\varphi \geq 0$ is the inverse Frisch elasticity, and $\chi > 0$ is a scaling parameter for the disutility of labour (drops out in the log-linearised model).
+	
+	The household faces the \emph{budget constraint} each period:
+	\begin{equation}\label{eq:budget}
+		P_t C_t + \frac{B_t}{1 + i_t} = B_{t-1} + W_t N_t + D_t,
+	\end{equation}
+	where $P_t$ is the aggregate price level, $B_t$ is the nominal value of one-period bonds, $i_t$ is the nominal interest rate, $W_t$ is the nominal wage, and $D_t$ is dividend income.
+	
+	\subsubsection{Deriving the Euler Equation}
+	
+	Forming the Lagrangian, taking first-order conditions for $C_t$ and $B_t$, and combining yields:
+	\begin{equation}\label{eq:euler_pi}
+		1 = \beta(1+i_t) \, \E_t\!\left[\left(\frac{C_{t+1}}{C_t}\right)^{\!-\sigma_c} \frac{1}{1+\pi_{t+1}}\right].
+	\end{equation}
+	
+	\subsection{Firms: Calvo Pricing and the Phillips Curve}
+	\label{sec:firms}
+	
+	In the New Keynesian model, there is a continuum of firms indexed by $j \in [0,1]$, each producing a slightly different variety of the consumption good.
+	Each period, each firm independently: with probability $1 - \xi$ resets its price optimally, and with probability $\xi$ keeps its previous price.
+	
+	Log-linearising the optimal reset price equation and the aggregate price level identity yields the New Keynesian Phillips Curve:
+	\begin{equation}\label{eq:nkpc_micro}
+		\pi_t = \beta \, \E_t[\pi_{t+1}] + \kappa \, y_t, \qquad \kappa = \frac{(1-\xi)(1-\beta\xi)}{\xi}(\sigma_c + \varphi).
+	\end{equation}
+	In the code, $\kappa$ is treated as a free parameter.
+	
+	\subsection{The Central Bank: Taylor Rule}
+	\label{sec:taylor_rule}
+	
+	\begin{equation}\label{eq:taylor_full}
+		i_t = \phi_\pi \, \pi_t + \phi_y \, y_t + v_t.
+	\end{equation}
+	The constraint $\phi_\pi > 1$ (Taylor principle) ensures determinacy.
+	The Taylor rule is enforced analytically in both the perturbation solver and the neural solver.
+	
+	\subsection{The Three-Equation System as Implemented}
+	\label{sec:3eq_code}
+	
+	\paragraph{State dynamics:}
+	\begin{equation}\label{eq:state_matrices}
+		x_t = h_x \, x_{t-1} + \eta \, \varepsilon_t, \quad
+		h_x = \begin{pmatrix} \rho_a & 0 \\ 0 & \rho_v \end{pmatrix}, \quad
+		\eta = \begin{pmatrix} \sigma_a & 0 \\ 0 & \sigma_v \end{pmatrix}.
+	\end{equation}
+	
+	\paragraph{IS curve:}
+	\begin{equation}\label{eq:is_code}
+		y_t = \E_t[y_{t+1}] - \frac{1}{\sigma_c}\bigl(i_t - \E_t[\pi_{t+1}]\bigr) + (1 - \rho_a)\, a_t.
+	\end{equation}
+	
+	\paragraph{NKPC:}
+	\begin{equation}\label{eq:nkpc_code}
+		\pi_t = \kappa \, y_t + \beta \, \E_t[\pi_{t+1}].
+	\end{equation}
+	
+	\paragraph{Taylor rule:}
+	\begin{equation}\label{eq:taylor_code}
+		i_t = \phi_\pi \, \pi_t + \phi_y \, y_t + v_t.
+	\end{equation}
+	
+	
+	%======================================================================
+	\section{Derivation of the Nonlinear IS Equation Used in the Code}
+	\label{sec:is_derivation}
+	%======================================================================
+	
+	\subsection{From Euler Equation to Nonlinear IS}
+	
+	\begin{equation}\label{eq:is_nonlinear}
+		\boxed{\underbrace{\exp\bigl(-\sigma_c y_t - i_t + \sigma_c(1-\rho_a)a_t\bigr)}_{\text{LHS: deterministic}} = \E_t\!\left[\underbrace{\exp\bigl(-\sigma_c y_{t+1} + \sigma_c \sigma_a \varepsilon_{a,t+1} - \pi_{t+1}\bigr)}_{\text{RHS: stochastic}}\right].}
+	\end{equation}
+	
+	\subsection{Recovering the Linear IS by Log-Linearisation}
+	
+	Taking logs and applying certainty equivalence recovers~\eqref{eq:is_code}.
+	
+	\subsection{The NKPC Residual}
+	
+	\begin{equation}\label{eq:nkpc_residual}
+		R_{\mathrm{NKPC}} = \pi_t - \kappa y_t - \beta \pi_{t+1}.
+	\end{equation}
+	
+	
+	%======================================================================
+	\section{The Epstein--Zin New Keynesian Model}
+	\label{sec:ez_model}
+	%======================================================================
+	
+	The software also includes an \code{EpsteinZinNKModel} that uses recursive Epstein--Zin preferences to separate risk aversion ($\gamma$) from the elasticity of intertemporal substitution ($\psi$).
+	Under standard CRRA, these are linked as $\gamma = 1/\psi = \sigma_c$.
+	
+	The key parameter governing all second-order effects is the \emph{excess risk aversion}:
+	\begin{equation}\label{eq:delta_ez}
+		\delta = \gamma - 1/\psi.
+	\end{equation}
+	When $\delta = 0$, the model reduces to standard CRRA and all second-order corrections vanish.
+	When $\delta > 0$ (preference for early resolution of uncertainty), the second-order corrections in $H_{xx}$, $G_{xx}$, $g_{ss}$, and $h_{ss}$ are all proportional to $\delta$.
+	The Epstein--Zin model also introduces cross-state interaction terms ($a \times v$ in $H_{xx}$, $G_{xx}$) that are absent under CRRA, because the nonlinear stochastic discount factor prices the interaction of real and nominal shocks.
+	
+	This model demonstrates why the UKF is necessary: when $\gamma = 10$ and $\psi = 1.5$, the excess risk aversion $\delta \approx 9.33$ amplifies all second-order corrections dramatically, and the linear Kalman filter produces severely biased posteriors.
+	The \code{dsgeEZ.py} main function runs a comprehensive comparison of KF, Augmented KF, and SR-UKF for the Epstein--Zin model.
+	
+
+	%======================================================================
+	\section{The SGU Small Open Economy Model}
+	\label{sec:sgu_model}
+	%======================================================================
+
+	The \code{SGUEstimable} class implements the small open economy model from Schmitt-Groh\'{e} and Uribe~\cite{sgu2003}, extended with a consumption preference shock ($\mu$) and a risk premium shock ($\zeta$) following Childers et~al.~\cite{childers2024}.
+	This is a substantially larger and more nonlinear model than the 3-equation New Keynesian model: it has 7 state variables, 8 control variables, 3 shocks, and 15 equilibrium conditions.
+
+	\subsection{Variables and Normalization}
+	\label{sec:sgu_variables}
+
+	\paragraph{State variables ($n_x = 7$).}
+	\begin{center}
+	\begin{tabular}{llcl}
+		\toprule
+		\textbf{Index} & \textbf{Symbol} & \textbf{Normalization} & \textbf{Description} \\
+		\midrule
+		0 & $d_t$          & Level     & Foreign debt \\
+		1 & $k_t$          & Log       & Capital stock ($e^{k_t}$ is the level) \\
+		2 & $r_t$          & Log       & Net interest rate ($e^{r_t}$ is the level) \\
+		3 & $a_t$          & Log       & Total factor productivity (AR(1)) \\
+		4 & $\text{rp}_t$  & Level     & Risk premium \\
+		5 & $\zeta_t$      & Level     & Risk premium shock (AR(1)) \\
+		6 & $\mu_t$        & Level     & Preference shock (AR(1)) \\
+		\bottomrule
+	\end{tabular}
+	\end{center}
+
+	\paragraph{Control variables ($n_y = 8$).}
+	\begin{center}
+	\begin{tabular}{llcl}
+		\toprule
+		\textbf{Index} & \textbf{Symbol} & \textbf{Normalization} & \textbf{Description} \\
+		\midrule
+		0 & $c_t$        & Log   & Consumption ($e^{c_t}$ is the level) \\
+		1 & $h_t$        & Log   & Hours ($e^{h_t}$ is the level) \\
+		2 & $\text{GDP}_t$ & Log & Output ($e^{\text{GDP}_t}$ is the level) \\
+		3 & $i_t$        & Log   & Investment ($e^{i_t}$ is the level) \\
+		4 & $k^f_t$      & Log   & Future capital (timing convention) \\
+		5 & $\lambda_t$  & Log   & Marginal utility ($e^{\lambda_t}$ is the level) \\
+		6 & $\text{tb}_t$ & Level & Trade balance / GDP \\
+		7 & $\text{ca}_t$ & Level & Current account / GDP \\
+		\bottomrule
+	\end{tabular}
+	\end{center}
+
+	\paragraph{Mixed normalization.}
+	A crucial feature of this model is its \emph{mixed log/level normalization}: variables $d$, $\text{rp}$, $\zeta$, $\mu$, $\text{tb}$, $\text{ca}$ are in levels, while $k$, $r$, $a$, $c$, $h$, $\text{GDP}$, $i$, $k^f$, $\lambda$ are in logs.
+	This means the equilibrium equations contain $e^{(\cdot)}$ terms that introduce strong nonlinearity when the Hessian is evaluated.
+	In contrast, fully log-linearized models (such as the standard RBC and the 3-equation NK model) have $\Psi \approx 0$ in many equations, producing small or zero $H_{xx}$ and $G_{xx}$.
+
+	\paragraph{Structural parameters (15 total).}
+	\begin{center}
+	\begin{tabular}{llll}
+		\toprule
+		$\alpha = 0.32$ & Capital share & $\delta = 0.1$ & Depreciation rate \\
+		$\gamma = 2$ & Risk aversion & $\phi = 0.028$ & Capital adj.\ cost \\
+		$\omega = 1.455$ & Labour supply elast.\ & $r_w = 0.04$ & World interest rate \\
+		$\psi = 7.42 \times 10^{-4}$ & Debt elasticity & $\bar{d} = 0.7442$ & Steady-state debt \\
+		$\beta = 1/(1+r_w)$ & Discount factor & & \\
+		\midrule
+		$\rho = 0.42$ & TFP persistence & $\sigma_e = 0.0129$ & TFP shock std \\
+		$\rho_u = 0.2$ & Risk prem.\ persist.\ & $\sigma_u = 0.003$ & Risk prem.\ shock std \\
+		$\rho_v = 0.4$ & Pref.\ shock persist.\ & $\sigma_v = 0.1$ & Pref.\ shock std \\
+		\bottomrule
+	\end{tabular}
+	\end{center}
+
+	\subsection{Equilibrium Conditions}
+	\label{sec:sgu_equations}
+
+	The model is defined by 15 equilibrium conditions $H(y', y, x', x; \theta) = 0$.
+	Following the ordering in \code{SGUSmallOpen.residuals}, with level values written as $C = e^c$, $K = e^k$, etc.:
+
+	\paragraph{Eq.~1: Resource constraint.}
+	\begin{equation}\label{eq:sgu_rc}
+		-C - I - \tfrac{\phi}{2}(K^f - K)^2 - (1 + e^r)\,d + d' + Y = 0.
+	\end{equation}
+	Output minus consumption, investment, capital adjustment costs, and debt service equals the change in debt.
+
+	\paragraph{Eq.~2: Production function.}
+	\begin{equation}\label{eq:sgu_prod}
+		Y - K^\alpha H^{1-\alpha} e^a = 0.
+	\end{equation}
+	Cobb--Douglas technology with TFP shock $a_t$.
+
+	\paragraph{Eq.~3: Capital accumulation.}
+	\begin{equation}\label{eq:sgu_kacc}
+		K^f - I - (1-\delta) K = 0.
+	\end{equation}
+
+	\paragraph{Eq.~4: Euler equation (intertemporal).}
+	\begin{equation}\label{eq:sgu_euler}
+		\Lambda - \beta (1 + e^{r'}) e^{\mu} \Lambda' = 0.
+	\end{equation}
+	The preference shock $e^\mu$ enters multiplicatively, amplifying intertemporal substitution.
+
+	\paragraph{Eq.~5: Marginal utility (GHH preferences).}
+	\begin{equation}\label{eq:sgu_lam}
+		(C - H^\omega / \omega)^{-\gamma} - \Lambda = 0.
+	\end{equation}
+	GHH (Greenwood--Hercowitz--Huffman) preferences eliminate the wealth effect on labour supply.
+	The composite $C - H^\omega/\omega$ must be positive.
+
+	\paragraph{Eq.~6: Labour FOC (intratemporal).}
+	\begin{equation}\label{eq:sgu_labor}
+		H^{\omega - 1}(C - H^\omega/\omega)^{-\gamma} - (1-\alpha)\,Y\,\Lambda / H = 0.
+	\end{equation}
+	From GHH preferences, the marginal rate of substitution between consumption and leisure equals the real wage.
+
+	\paragraph{Eq.~7: Capital FOC (Tobin's $q$).}
+	\begin{equation}\label{eq:sgu_capital}
+		(1 + \phi(K^f - K))\Lambda - \beta\bigl((1-\delta) + \phi(K^{f\prime} - K^f) + \alpha Y'/K^f\bigr) e^{\mu} \Lambda' = 0.
+	\end{equation}
+	Capital adjustment costs create a wedge between the marginal cost of investment (left) and the marginal return (right).
+
+	\paragraph{Eq.~8: Interest rate.}
+	\begin{equation}\label{eq:sgu_ir}
+		e^{r'} - r_w - \text{rp}' = 0.
+	\end{equation}
+	The country-specific interest rate equals the world rate plus a risk premium.
+
+	\paragraph{Eq.~9: Risk premium.}
+	\begin{equation}\label{eq:sgu_rp}
+		\text{rp}' - \psi(e^{d' - \bar{d}} - 1) - \zeta = 0.
+	\end{equation}
+	The risk premium is increasing in debt (the ``elastic interest rate'' closure of SGU~\cite{sgu2003}) plus a stochastic component $\zeta$.
+
+	\paragraph{Eq.~10: Trade balance.}
+	\begin{equation}\label{eq:sgu_tb}
+		\text{tb} + \frac{C + I + \frac{\phi}{2}(K^f - K)^2}{Y} - 1 = 0.
+	\end{equation}
+
+	\paragraph{Eq.~11: Current account.}
+	\begin{equation}\label{eq:sgu_ca}
+		\text{ca} + \frac{d' - d}{Y} = 0.
+	\end{equation}
+
+	\paragraph{Eq.~12: Capital identity.}
+	\begin{equation}\label{eq:sgu_kid}
+		K^f - K' = 0.
+	\end{equation}
+	Links the control $k^f_t$ (chosen at time $t$) to the state $k_{t+1}$.
+
+	\paragraph{Eqs.~13--15: Exogenous shocks.}
+	\begin{align}
+		a_{t+1} &= \rho\, a_t + \sigma_e\, \varepsilon_{t+1}^a, \label{eq:sgu_tfp}\\
+		\zeta_{t+1} &= \rho_u\, \zeta_t + \sigma_u\, \varepsilon_{t+1}^u, \label{eq:sgu_zeta}\\
+		\mu_{t+1} &= \rho_v\, \mu_t + \sigma_v\, \varepsilon_{t+1}^v. \label{eq:sgu_mu}
+	\end{align}
+
+	\subsection{Steady State}
+	\label{sec:sgu_ss}
+
+	At the deterministic steady state, all shocks are zero ($a = \zeta = \mu = 0$, $\text{rp} = 0$) and variables are constant.
+	From the Euler equation~\eqref{eq:sgu_euler}: $\beta(1 + r_w) = 1$, which pins down $\beta$.
+	The remaining values are determined sequentially:
+
+	\begin{enumerate}
+		\item From the production FOCs (labour and capital):
+		\[
+			A_{\text{coeff}} \equiv \left(\frac{\alpha}{r_w + \delta}\right)^{\alpha/(1-\alpha)}, \qquad
+			\bar{H} = \bigl((1-\alpha)\, A_{\text{coeff}}\bigr)^{1/(\omega - 1)}.
+		\]
+
+		\item Output, capital, investment, consumption:
+		\[
+			\bar{Y} = A_{\text{coeff}}\,\bar{H}, \quad
+			\bar{K} = \frac{\alpha}{r_w + \delta}\,\bar{Y}, \quad
+			\bar{I} = \delta\,\bar{K}, \quad
+			\bar{C} = \bar{Y} - \bar{I} - r_w\,\bar{d}.
+		\]
+
+		\item Marginal utility and ratios:
+		\[
+			\bar{\Lambda} = (\bar{C} - \bar{H}^\omega/\omega)^{-\gamma}, \qquad
+			\overline{\text{tb}} = 1 - (\bar{C} + \bar{I})/\bar{Y}, \qquad
+			\overline{\text{ca}} = 0.
+		\]
+	\end{enumerate}
+
+	With the calibration above, the steady-state values (in the model's internal representation) are:
+
+	\begin{center}
+	\begin{tabular}{llr@{.}l}
+		\toprule
+		$d = \bar{d}$ & Debt (level) & 0&7442 \\
+		$k = \log\bar{K}$ & Capital (log) & 1&2231 \\
+		$r = \log r_w$ & Interest rate (log) & $-3$&2189 \\
+		$c = \log\bar{C}$ & Consumption (log) & 0&1106 \\
+		$h = \log\bar{H}$ & Hours (log) & 0&0074 \\
+		$\text{GDP} = \log\bar{Y}$ & Output (log) & 0&3964 \\
+		$i = \log\bar{I}$ & Investment (log) & $-1$&0795 \\
+		$\lambda = \log\bar{\Lambda}$ & Marginal utility (log) & 1&7244 \\
+		$\text{tb}$ & Trade balance/GDP & 0&0200 \\
+		\bottomrule
+	\end{tabular}
+	\end{center}
+
+
+	\subsection{Second-Order Perturbation: Why $\|H_{xx}\|$ and $\|G_{xx}\|$ Are Large}
+	\label{sec:sgu_hxx}
+
+	The second-order perturbation of the SGU model produces coefficients with Frobenius norms $\|H_{xx}\| \approx 604$ and $\|G_{xx}\| \approx 2{,}731$, orders of magnitude larger than for the 3-equation NK model (where both are essentially zero) or the simple test models in SGU~\cite{sgu2004} (where $\|H_{xx}\| < 0.25$).
+	This subsection explains why.
+
+	\subsubsection{Comparison with SGU (2004)}
+
+	The paper ``Solving dynamic general equilibrium models using a second-order approximation to the policy function'' by SGU~\cite{sgu2004} describes the \emph{second-order perturbation method} and tests it on three simple models:
+
+	\begin{center}
+	\begin{tabular}{lcccc}
+		\toprule
+		\textbf{Model} & $n_x$ & $n_y$ & \textbf{Normalization} & $\|H_{xx}\|$ \\
+		\midrule
+		Neoclassical growth     & 2 & 1 & All log & $\sim 0.08$ \\
+		Two-country RBC         & 4 & 1 & All log & $\sim 0.22$ \\
+		Asset pricing           & 1 & 1 & All log & $\sim 0.42$ \\
+		\midrule
+		SGU small open economy  & 7 & 8 & Mixed log/level & $\sim 604$ \\
+		\bottomrule
+	\end{tabular}
+	\end{center}
+
+	The SGU small open economy model is a \emph{different model} from any in SGU~\cite{sgu2004}---it originates from SGU~\cite{sgu2003} (``Closing small open economy models'').
+	Its much larger second-order terms arise from three reinforcing mechanisms.
+
+	\subsubsection{Mechanism 1: The Hessian Tensor $\Psi$}
+
+	The Hessian tensor $\Psi_{i,a,b} = \partial^2 H_i / \partial v_a \partial v_b$ (where $v = (y', y, x', x)$) measures the curvature of the equilibrium conditions at the steady state.
+	For the SGU model, $\Psi \in \mathbb{R}^{15 \times 30 \times 30}$ with $\|\Psi\| = 631$.
+
+	The curvature is concentrated in two equations:
+	\begin{center}
+	\begin{tabular}{lrl}
+		\toprule
+		\textbf{Equation} & $\|\Psi_i\|$ & \textbf{Source of curvature} \\
+		\midrule
+		Eq.~5: marginal utility ($\lambda$) & 459 & $(C - H^\omega/\omega)^{-\gamma}$ with $\gamma = 2$ \\
+		Eq.~6: labour FOC ($k^f$)           & 432 & $H^{\omega-1}(C - H^\omega/\omega)^{-\gamma}$ \\
+		All other equations                  & $< 14$ each & \\
+		\bottomrule
+	\end{tabular}
+	\end{center}
+
+	The GHH preference structure $(C - H^\omega/\omega)^{-\gamma}$ is the dominant source.
+	Taking second derivatives yields terms proportional to $\gamma(\gamma+1)(C - H^\omega/\omega)^{-\gamma-2}$, which with $\gamma = 2$ and $\bar{C} - \bar{H}^\omega/\omega \approx 0.44$ gives a factor of $\sim 82$ per derivative pair.
+	The largest individual entries are:
+
+	\begin{center}
+	\begin{tabular}{lcr}
+		\toprule
+		\textbf{Entry} & \textbf{Equation} & \textbf{Value} \\
+		\midrule
+		$\Psi[\lambda, h, h]$ & Marginal utility & $253$ \\
+		$\Psi[k^f, h, h]$ & Labour FOC & $232$ \\
+		$\Psi[\lambda, c, h]$ & Marginal utility & $-227$ \\
+		$\Psi[\lambda, c, c]$ & Marginal utility & $207$ \\
+		$\Psi[k^f, c, c]$ & Labour FOC & $206$ \\
+		\bottomrule
+	\end{tabular}
+	\end{center}
+
+	For comparison, the 3-equation NK model has $\|\Psi\| = 3.17$ with all curvature concentrated in the Euler equation (from $e^{-\sigma_c \hat{y}}$), and the curvature involves only controls, not states---hence $M^T \Psi M \approx 0$ and $H_{xx} \approx 0$.
+
+	\subsubsection{Mechanism 2: Near-Unit-Root Dynamics and Sylvester Amplification}
+
+	The second-order coefficients $H_{xx}$ and $G_{xx}$ satisfy the Sylvester equation~(A.5) of Childers et~al.~\cite{childers2024}:
+	\[
+		A \cdot X \cdot (h_x \otimes h_x)^T + D \cdot X = -C,
+	\]
+	which vectorizes to $(F^T \otimes A + I \otimes D)\,\text{vec}(X) = -\text{vec}(C)$.
+
+	The left-hand side matrix $\text{LHS} \in \mathbb{R}^{735 \times 735}$ has condition number $\kappa(\text{LHS}) = 3.24 \times 10^8$, meaning it amplifies the already-large right-hand side $\|C\| = 1{,}493$ by up to $10^8$.
+	The ill-conditioning stems from the eigenvalues of $h_x$:
+
+	\begin{center}
+	\begin{tabular}{lr}
+		\toprule
+		\textbf{Eigenvalue} & $|\lambda|$ \\
+		\midrule
+		$\lambda_0 = 0.9967$ & $\leftarrow$ debt dynamics (near unit root) \\
+		$\lambda_1 = 0.478$ & capital \\
+		$\lambda_2 = 0.420$ & risk premium \\
+		$\lambda_3 = 0.400$ & preference shock \\
+		$\lambda_4 = 0.200$ & TFP \\
+		$\lambda_5, \lambda_6 \approx 0$ & \\
+		\bottomrule
+	\end{tabular}
+	\end{center}
+
+	The product $\lambda_0 \cdot \lambda_0 = 0.993$ is very close to~1, making the denominator of the Sylvester solution near-singular for the $(d, d)$ block.
+	This is the ``debt eigenvalue'' problem: the elastic interest rate closure with small $\psi = 7.42 \times 10^{-4}$ makes debt dynamics persistent ($|\lambda| \to 1$), which amplifies the second-order debt terms.
+
+	\subsubsection{Mechanism 3: Mixed Log/Level Normalization}
+
+	In fully log-linearized models, steady-state values drop out of the Hessian because $\partial^2 / \partial (\log X)^2 \propto 1$ regardless of $\bar{X}$.
+	In the SGU model, debt $d$ is in levels while capital $k$ is in logs.
+	When the equilibrium conditions combine level and log variables through $e^{(\cdot)}$ terms, the Hessian picks up scale factors from the steady-state values.
+	For example, the resource constraint~\eqref{eq:sgu_rc} has $(1 + e^r) d$ with $e^{\bar{r}} = r_w = 0.04$ and $\bar{d} = 0.7442$, creating cross-derivative terms proportional to these level values.
+
+	\subsubsection{Decomposition of $H_{xx}$ and $G_{xx}$ by Row}
+
+	The second-order coefficients are concentrated in specific rows:
+
+	\begin{center}
+	\begin{tabular}{lrl}
+		\toprule
+		\textbf{$H_{xx}$ row} & $\|H_{xx}[i,:]\|$ & \textbf{Dominant entry} \\
+		\midrule
+		$r$ (interest rate) & 601 & $H_{xx}[r, (\zeta, \zeta)] = -601$ \\
+		$d$ (debt) & 67 & $H_{xx}[d, (\zeta, \zeta)] = 66$ \\
+		$k$ (capital) & 13 & $H_{xx}[k, (\zeta, \zeta)] = -12$ \\
+		All others & $< 1$ & \\
+		\bottomrule
+	\end{tabular}
+	\end{center}
+
+	\begin{center}
+	\begin{tabular}{lrl}
+		\toprule
+		\textbf{$G_{xx}$ row} & $\|G_{xx}[i,:]\|$ & \textbf{Dominant entry} \\
+		\midrule
+		$i$ (investment) & 2,729 & $G_{xx}[i, (\zeta, \zeta)] = -2{,}665$ \\
+		$\text{tb}$ (trade balance) & 54 & $G_{xx}[\text{tb}, (\zeta, \zeta)] = -45$ \\
+		$\text{ca}$ (current account) & 54 & $G_{xx}[\text{ca}, (\zeta, \zeta)] = 45$ \\
+		All others & $< 13$ & \\
+		\bottomrule
+	\end{tabular}
+	\end{center}
+
+	The preference shock $\zeta$ (risk premium shock) dominates both $H_{xx}$ and $G_{xx}$.
+	This occurs because $\zeta$ enters the interest rate~\eqref{eq:sgu_ir}--\eqref{eq:sgu_rp} additively (in levels), then interacts with debt dynamics through the Euler equation and resource constraint.
+	The near-unit-root debt eigenvalue amplifies these interactions through the Sylvester equation.
+
+	\paragraph{Volatility corrections.}
+	Despite the large $H_{xx}$ and $G_{xx}$, the volatility corrections $h_{ss}$ and $g_{ss}$ are moderate:
+	$\|h_{ss}\| = 0.11$, $\|g_{ss}\| = 0.58$.
+	The largest entry is $g_{ss}[\lambda] = 0.56$ (the precautionary savings motive shifting marginal utility) and $h_{ss}[d] = -0.11$ (debt adjusts downward under uncertainty).
+	These are solved from a separate linear system~(A.7) and are not amplified by the Sylvester equation.
+
+	\subsubsection{Implications for Filtering and Estimation}
+	\label{sec:sgu_estimation_implications}
+
+	With $\|H_{xx}\| \approx 604$, even a modest state estimation error of $\|e_x\| \sim 0.01$ in $x^f$ produces a Kronecker correction of order $H_{xx} \cdot (e_x \otimes e_x) \sim 604 \times 10^{-4} \approx 0.06$, which is comparable to the volatility correction $h_{ss}$.
+	Larger errors (as inevitably arise in the first few filter steps) create much larger corrections, driving $x^s$ to the clipping boundary.
+
+	This is a fundamental limitation of all Kalman-type filters---linear KF, EKF, UKF, and pruned variants---for the SGU model at second order.
+	Two alternatives exist:
+
+	\begin{enumerate}
+		\item \textbf{Particle filter (sequential Monte Carlo)}: Sample from the proposal distribution and reweight, avoiding the Gaussian approximation.
+		\item \textbf{Joint estimation}: Treat all exogenous shocks $\{\varepsilon_t\}_{t=1}^T$ as latent HMC parameters alongside the structural parameters $\theta$, using forward simulation instead of filtering.
+		This is the approach taken by Childers et~al.~\cite{childers2024} (see Section~\ref{sec:joint_estimation}).
+	\end{enumerate}
+
+
+	\subsection{Joint Estimation: The HMCExamples.jl Approach}
+	\label{sec:joint_estimation}
+
+	The Julia package \texttt{HMCExamples.jl} by Childers et~al.~\cite{childers2024} implements three estimation modes for the SGU model:
+
+	\begin{center}
+	\begin{tabular}{llcc}
+		\toprule
+		\textbf{Mode} & \textbf{Filter} & \textbf{Order} & \textbf{HMC params} \\
+		\midrule
+		\texttt{sgu\_1\_kalman} & Kalman filter & 1st & 7 (structural only) \\
+		\texttt{sgu\_1\_joint} & Forward simulation & 1st & $7 + n_\varepsilon T$ \\
+		\texttt{sgu\_2\_joint} & Forward simulation & 2nd & $7 + n_\varepsilon T$ \\
+		\bottomrule
+	\end{tabular}
+	\end{center}
+
+	\subsubsection{Why Joint Estimation Avoids the $H_{xx}$ Problem}
+
+	In joint estimation, all $T \times n_\varepsilon$ shock realizations are drawn as HMC parameters:
+	\[
+		\varepsilon_{\text{draw}} \sim \mathcal{N}(0, I_{n_\varepsilon T}), \qquad
+		\varepsilon = \text{reshape}(\varepsilon_{\text{draw}},\; n_\varepsilon \times T).
+	\]
+	With $T = 200$ and $n_\varepsilon = 3$, this gives $7 + 600 = 607$ total HMC parameters (compared to 7 for the Kalman approach).
+
+	The log-likelihood is computed by \emph{forward simulation} through the pruned second-order dynamics:
+	\begin{align}
+		x^f_t &= h_x\, x^f_{t-1} + \eta\, \varepsilon_t, \\
+		x^s_t &= h_x\, x^s_{t-1} + \tfrac{1}{2} H_{xx}(x^f_{t-1} \otimes x^f_{t-1}) + \tfrac{1}{2} h_{ss}, \\
+		\hat{y}_t &= g_x(x^f_t + x^s_t) + \tfrac{1}{2} G_{xx}(x^f_t \otimes x^f_t) + \tfrac{1}{2} g_{ss},
+	\end{align}
+	and the observation log-density is $\sum_t \log p(y_t^{\text{obs}} \mid \hat{y}_t)$.
+
+	The key insight is that with \emph{known} shocks $\varepsilon_t$, the states $x^f_t$ are computed \emph{exactly}---there is no estimation error.
+	The Kronecker product $x^f \otimes x^f$ is evaluated at the true (proposed) state, not at a filtered estimate, so the large $H_{xx}$ does not amplify any estimation uncertainty.
+	The only ``error'' is the sampling noise from HMC, which is controlled by the leapfrog integrator's step size and the prior on $\varepsilon$.
+
+	\subsubsection{Dimension and Computational Cost}
+
+	The joint approach increases the HMC parameter dimension from 7 to 607, which:
+	\begin{itemize}
+		\item Requires more leapfrog steps per HMC iteration (dimension-dependent mixing);
+		\item Needs more warmup iterations for the mass matrix adaptation;
+		\item Benefits from the differentiable solver (gradients through the pruned dynamics are cheap via automatic differentiation).
+	\end{itemize}
+
+	Despite the higher dimension, Childers et~al.~\cite{childers2024} report successful estimation with the NUTS sampler.
+	The gradient computation is efficient because the forward simulation is a simple scan (sequential matrix multiplications and Kronecker products) with $O(T \cdot n_x^2)$ cost per evaluation.
+
+	\subsubsection{Implications for This Codebase}
+	\label{sec:joint_impl}
+
+	The current codebase supports Kalman-type filtering only.
+	Adding a joint estimation mode would require:
+	\begin{enumerate}
+		\item Augmenting the HMC parameter vector with $n_\varepsilon \times T$ shock parameters.
+		\item Replacing the filter's \texttt{log\_likelihood} with a forward-simulation scan.
+		\item Adding a standard normal prior $\varepsilon \sim \mathcal{N}(0, I)$ on the shock parameters.
+		\item Adapting the mass matrix for the mixed (structural + shock) parameter space.
+	\end{enumerate}
+	This is architecturally straightforward but would require changes to the estimator interface.
+	The approach would enable second-order SGU estimation, which is not currently possible with any filter in the library.
+
+
+	%======================================================================
+	%  PART II: SOLUTION METHODS
+	%======================================================================
+	
+	\part{Solution Methods}
+	
+	%======================================================================
+	\section{The Policy Function Concept}
+	\label{sec:policy}
+	%======================================================================
+	
+	A policy function maps the current state and structural parameters to optimal controls:
+	\begin{equation}\label{eq:policy_def}
+		\Pi: \R^2 \times \R^9 \to \R^2, \qquad \bigl((a_t, v_t), \btheta\bigr) \mapsto (y_t, \pi_t).
+	\end{equation}
+	The interest rate $i_t$ is computed analytically from~\eqref{eq:taylor_code}.
+	The policy must satisfy the Euler equations in expectation for all states and parameters:
+	\begin{equation}\label{eq:euler_residual}
+		\E_\varepsilon\!\left[\begin{pmatrix} R_{\mathrm{IS}} \\ R_{\mathrm{NKPC}} \end{pmatrix}\right] = \mathbf{0}.
+	\end{equation}
+	
+	%======================================================================
+	\section{First-Order Perturbation Solution}
+	\label{sec:perturbation_1}
+	%======================================================================
+	
+	\subsection{Method of Undetermined Coefficients}
+	
+	We guess $y_t = g_{ya}\, a_t + g_{yv}\, v_t$, $\pi_t = g_{\pi a}\, a_t + g_{\pi v}\, v_t$ and solve.
+	
+	The characteristic denominator:
+	\begin{equation}\label{eq:denom}
+		\boxed{D(r) = (1 - r) + \frac{\phi_y}{\sigma_c} + \frac{\kappa(\phi_\pi - r)}{\sigma_c(1 - \beta r)}.}
+	\end{equation}
+	
+	The solutions:
+	\begin{align}
+		g_{ya} &= \frac{1 - \rho_a}{D(\rho_a)}, \label{eq:gya_solution}\\
+		g_{yv} &= \frac{-1/\sigma_c}{D(\rho_v)}, \label{eq:gyv_solution}\\
+		g_{\pi a} &= \frac{\kappa \, g_{ya}}{1 - \beta \rho_a}, \quad g_{\pi v} = \frac{\kappa \, g_{yv}}{1 - \beta \rho_v}, \\
+		g_{ia} &= \phi_\pi g_{\pi a} + \phi_y g_{ya}, \quad g_{iv} = \phi_\pi g_{\pi v} + \phi_y g_{yv} + 1. \label{eq:giv}
+	\end{align}
+	
+	The first-order solution is $c_t = g_x\, x_t$ where $g_x \in \R^{3\times 2}$.
+	
+	%======================================================================
+	\section{Second-Order Perturbation Solution}
+	\label{sec:perturbation_2}
+	%======================================================================
+	
+	\begin{equation}\label{eq:second_order}
+		c_t = g_x \, x_t + \frac{1}{2} G_{xx} (x_t \otimes x_t) + \frac{1}{2} g_{ss}.
+	\end{equation}
+	
+	The \code{SmallNKModel.\_second\_order} method uses an ad-hoc parameterisation controlled by the \code{nl\_scale} attribute (set at construction time via \code{SmallNKModel(nl\_scale=2.0)}).
+	At \code{nl\_scale = 0}, the model is exactly linear (all second-order terms are zero).
+	At \code{nl\_scale = 1.0}, the terms correspond to the ad-hoc second-order approximation.
+	At \code{nl\_scale = 2.0} (used in the tutorial), the second-order effects are doubled for testing purposes.
+	
+	\warn{The second-order terms in \code{SmallNKModel} are \emph{not} derived from the full second-order perturbation equations (which require solving a Sylvester equation).
+		Instead, they use a simplified ``ad-hoc'' parameterisation where the quadratic coefficients are proportional to products of the first-order coefficients, scaled by \code{nl\_scale * kappa}.
+		For the small NK model with moderate \code{nl\_scale}, this approximation is adequate for testing the neural solver.}
+	
+	The \code{EpsteinZinNKModel} class provides a more principled second-order solution where all corrections scale with $\delta = \gamma - 1/\psi$, including cross-state interaction terms.
+
+	\subsection{Sylvester Equation Solver}
+	\label{sec:sylvester_solver}
+
+	The second-order coefficients $G_{xx}$ and $H_{xx}$ satisfy a generalized Sylvester equation.
+	Let $F = h_x \otimes h_x$ (same layout as \code{np.kron(h\_x, h\_x)} / \code{\_tf\_kron(h\_x, h\_x)}).
+	The production solver implements
+	\begin{equation}\label{eq:sylvester_raw}
+		A X F + D X + C = 0,
+	\end{equation}
+	where $A, D \in \mathbb{R}^{n \times n}$ are built from first-order Jacobian blocks, $C$ from the Hessian tensor $\Psi$ and the stacking matrix $M$, and $X \in \mathbb{R}^{n \times n_x^2}$ stacks $G_{xx}$ and $H_{xx}$ in rows.
+	Equivalent Kronecker form: $(F^\top \otimes A + I_{n_x^2} \otimes D)\,\mathrm{vec}_F(X) = -\mathrm{vec}_F(C)$ with Fortran (column-major) $\mathrm{vec}_F$---see~\eqref{eq:sylvester_kron_form} and Section~\ref{sec:sylvester_transpose_pitfall} for why test code must not confuse $F$ and $F^\top$ in the \emph{matrix} residual.
+
+	\paragraph{Bartels-Stewart algorithm.}
+	The solver uses the Bartels-Stewart algorithm, implemented as a LAPACK-backed TensorFlow custom op (\code{MklSylvester}) with XLA and GPU support.
+	Let $F = h_x \otimes h_x$.  The algorithm proceeds in four steps:
+	\begin{enumerate}
+		\item \textbf{Real Schur decomposition} of $h_x$ via LAPACK \code{DGEES}: $h_x = Q \, T \, Q^T$, so $F = (Q \otimes Q)(T \otimes T)(Q \otimes Q)^T$.  Cost: $O(n_x^3)$.
+		\item \textbf{Transform} the RHS: $\tilde{C} = C \cdot (Q \otimes Q)$.  Exploiting the Kronecker structure, this is computed as $n$ applications of $M \mapsto Q^T M Q$ on $n_x \times n_x$ matrices, costing $O(n \cdot n_x^3)$.
+		\item \textbf{Forward substitution} through $T \otimes T$ (quasi-upper triangular).  After the substitution $Y = X (Q \otimes Q)$, the equation becomes $A Y (T \otimes T) + D Y = -\tilde{C}$.  Column $j$:
+		\begin{equation}
+			(D + (T \otimes T)_{jj} \, A) \, y_j = -\tilde{c}_j - A \sum_{k < j} y_k \, (T \otimes T)_{kj}.
+		\end{equation}
+		Each column solve is an $n \times n$ system via LAPACK \code{DGESV} (LU factorization).
+		For 2\texttimes2 Schur blocks (complex conjugate eigenvalue pairs of $h_x$), the corresponding columns of $T \otimes T$ couple, yielding $2n \times 2n$ or $4n \times 4n$ systems.
+		Total cost: $O(n^3 \cdot n_x^2)$.
+		\item \textbf{Back-transform}: $X = Y \cdot (Q^T \otimes Q^T)$, again via the reshape trick.  Cost: $O(n \cdot n_x^3)$.
+	\end{enumerate}
+	\textbf{Total cost}: $O(n_x^3 + n^3 n_x^2)$.
+	For the SGU model ($n = 15$, $n_x = 7$): $\approx 1.7 \times 10^5$ operations.
+	For a model with $n = 100$, $n_x = 50$: $\approx 2.5 \times 10^9$ operations---still tractable.
+
+	\paragraph{Custom op architecture.}
+	The implementation (\code{mkl\_sylvester\_op.cc}) follows the same six-section architecture as the QZ custom op (\code{mkl\_qz\_op.cc}): LAPACK helper, XLA custom-call body, target registration, TF op declaration, CPU/GPU eager kernels, and XLA compilation kernel.
+	The GPU path uses the same host-bounce pattern (GPU$\to$CPU$\to$GPU) as the QZ op.
+	The perturbation stack differentiates through the model using implicit-function/adjoint machinery; the standalone TensorFlow op \code{MklSylvester} does \emph{not} register a reverse-mode gradient, so \code{tape.gradient} through the raw op raises \code{LookupError}.
+	Regression tests therefore verify sensitivities w.r.t.\ $C$ via the closed-form implicit derivative from~\eqref{eq:sylvester_kron_form} or finite differences, not autodiff through the custom call.
+
+	\paragraph{Comparison with earlier approaches.}
+
+	\begin{center}
+	\begin{tabular}{lccl}
+		\toprule
+		Method & Cost & SGU ($n{=}15, n_x{=}7$) & Failure mode \\
+		\midrule
+		Eigendecomposition & $O(n_x^2 n^3)$ & $1.7 \times 10^5$ & $\kappa(V)^2$ amplification \\
+		Kronecker vectorization & $O((n n_x^2)^3)$ & $4 \times 10^8$ & Memory: $O((n n_x^2)^2)$ \\
+		Bartels-Stewart (current) & $O(n^3 n_x^2)$ & $1.7 \times 10^5$ & None observed \\
+		\bottomrule
+	\end{tabular}
+	\end{center}
+
+	The eigendecomposition approach suffered from $\kappa(V)^2$ error amplification when $h_x$ had near-zero eigenvalues (as in SGU), inflating $\|H_{xx}\|$ by $\sim 22\times$.
+	The Kronecker vectorization was numerically accurate but scales as $O((n n_x^2)^3)$, becoming infeasible for $n \cdot n_x^2 \gtrsim 2000$.
+	Bartels-Stewart combines the efficiency of the eigendecomposition approach with the numerical robustness of the direct approach, using Schur decomposition (orthogonal transforms) instead of eigenvectors.
+
+	%======================================================================
+	\section{The Neural Network Solver}
+	\label{sec:neural_solver}
+	%======================================================================
+	
+	\subsection{Architecture}
+	\label{sec:nn_arch}
+	
+	The neural network $\Pi_{\bpsi}: \R^{n_s + n_\theta} \to \R^{n_c}$ takes normalised $(\text{states}, \tilde{\btheta})$ as input and outputs $(y, \pi)$.
+	The \code{ScalablePolicyNetwork} auto-selects architecture based on $d_{\mathrm{in}}$:
+	
+	\begin{center}
+		\begin{tabular}{lll}
+			\toprule
+			$d_{\mathrm{in}}$ range & Hidden layers & Residual connections \\
+			\midrule
+			$< 20$ & $[128, 128]$ & No \\
+			$20$--$59$ & $[256, 256, 128]$ & No \\
+			$\geq 60$ & $[512, 256, 256, 256]$ & Gated skip \\
+			\bottomrule
+		\end{tabular}
+	\end{center}
+	
+	For our NK model ($d_{\mathrm{in}} = 11$, being 2 states + 9 parameters), this gives $128$--$128$ hidden layers.
+	Default activation: $\tanh$ ($C^\infty$).
+	The architecture also supports SIREN ($\sin(\omega_0 z)$) and MRePU ($z(z+1)^k \mathbf{1}_{z \geq -1}$) activations, as well as optional spectral normalisation on hidden layers.
+	
+	The input normalisation is:
+	\begin{equation}\label{eq:input_norm}
+		\tilde{x}_j = \frac{x_j - \mu_j}{s_j},
+	\end{equation}
+	where $\mu_j$ and $s_j$ are the mean and scale of dimension $j$'s training domain.
+	For states, $\mu = 0$ and $s = $ domain half-width.
+	For parameters (or canonical $\psi$), $\mu = (\psi_{\min} + \psi_{\max})/2$ and $s = (\psi_{\max} - \psi_{\min})/2$, computed from the training domain bounds.
+	
+	\subsection{Canonical Reparameterisation}
+	\label{sec:reparam}
+	
+	The 9 structural parameters have vastly different posterior spreads and correlations.
+	For the test model, the posterior covariance condition number is approximately 1150.
+	Training the neural network directly in $\btheta$-space means that gradient penalties (Sobolev, PG) are dominated by loosely-constrained parameters, while tightly-constrained parameters---where HMC divergences originate---are under-regularised.
+	
+	\emph{Canonical reparameterisation} addresses this by transforming to a decorrelated, unit-scale space.
+	Given preliminary posterior samples (from a quick perturbation-based HMC), we compute the posterior covariance $\Sigma_\theta$ and its eigendecomposition square root:
+	\begin{equation}\label{eq:reparam_def}
+		M = V \Lambda^{1/2}, \qquad \psi = M^{-1}(\btheta - \btheta_{\mathrm{mode}}),
+	\end{equation}
+	where $V \Lambda V^\top = \Sigma_\theta$.
+	In $\psi$-space, parameters are decorrelated and approximately unit-variance.
+	
+	The neural network is trained entirely in $\psi$-space:
+	the NN input receives $\psi_{\mathrm{norm}} = (\psi - \mu_\psi) / \sigma_\psi$;
+	training samples are drawn in $\psi$-space, round-tripped through $\btheta$ for bound enforcement;
+	Euler equation residuals internally convert $\psi \to \btheta$ for economic consistency;
+	and the external interface (\code{solve($\btheta$)}) accepts structural $\btheta$ and converts automatically.
+	
+	The impact is dramatic.
+	Without any explicit gradient regularisation, reparameterisation alone reduces divergences from 129 to 4 (a 32-fold improvement).
+	With Sobolev regularisation, reparameterisation turns a FAIL (6 divergences) into a PASS (0 divergences, $\hat{R} = 1.035$, ESS $= 255$).
+	With PG regularisation, the optimal $\lambda_{\mathrm{pg}}$ decreases from $5 \times 10^{-2}$ (in $\btheta$-space) to $10^{-2}$ (in $\psi$-space), achieving 0 divergences, $\hat{R} = 1.018$, ESS $= 283$.
+	
+	The mechanism is clear: in $\psi$-space, the Frobenius penalty $\|\partial R/\partial\psi\|_F^2$ equally weights all decorrelated parameter directions.
+	In $\btheta$-space, the same penalty is dominated by parameters with large $\partial R/\partial\theta$ (typically the loosely-constrained ones), leaving the tightly-constrained directions under-regularised.
+	
+	\warn{The preliminary posterior samples used to compute $M$ must be obtained from a separate estimation run (e.g., using the perturbation model).
+		In the tutorial, Stage~1 runs a short single-chain HMC with the perturbation model to generate these samples.
+		If the preliminary posterior is very different from the true posterior (e.g., due to severe model misspecification), the reparameterisation may be suboptimal but is unlikely to be harmful.}
+	
+	\subsection{The All-in-One (AiO) Trick}
+	\label{sec:aio}
+	
+	\begin{proposition}[AiO identity]
+		For two independent shock draws $\varepsilon^{(1)} \perp \varepsilon^{(2)}$:
+		\begin{equation}\label{eq:aio_trick}
+			\E_{\varepsilon^{(1)}, \varepsilon^{(2)}}\!\left[R^{(1)} \cdot R^{(2)}\right] = \bigl(\E_\varepsilon[R]\bigr)^2.
+		\end{equation}
+	\end{proposition}
+	
+	\subsection{AiO Loss with Residual Balancing}
+	\label{sec:residual_balancing}
+	
+	\begin{equation}\label{eq:aio_loss}
+		\mathcal{L}_{\mathrm{AiO}} = \sum_{j=1}^{2} \left[\exp(-\ell_j) \cdot \frac{1}{B}\sum_{b=1}^{B} R_j^{(1),b} R_j^{(2),b} + \ell_j\right].
+	\end{equation}
+	
+	The learnable per-equation log-variance weights $\ell_j$ implement residual balancing \`{a} la \citet{kendall2018}.
+	Without clamping, the weights can diverge and one equation dominates.
+	With max $|\ell_j| \leq 5$ (the \code{max\_log\_var} parameter), the weight ratio stays bounded at approximately 148:1.
+	
+	\subsection{Training Pipeline}
+	\label{sec:training_pipeline}
+	
+	The total training loss:
+	\begin{equation}\label{eq:total_loss}
+		\mathcal{L}_{\mathrm{total}} = \underbrace{\mathcal{L}_{\mathrm{AiO}}}_{\text{Euler residual}} + \lambda_{\mathrm{sob}} \underbrace{\mathcal{L}_{\mathrm{sob}}}_{\text{Sobolev}} + \lambda_{\mathrm{pg}} \underbrace{\mathcal{L}_{\mathrm{pg}}}_{\text{pert.\ gradient}} + \lambda_{\mathrm{gc}} \underbrace{\widetilde{\mathcal{L}}}_{\text{grad.\ consistency}} + \lambda_{\mathrm{wd}} \underbrace{\|\bpsi\|^2}_{\text{weight decay}}.
+	\end{equation}
+	
+	Under canonical reparameterisation, the recommended R3 configuration uses: $\lambda_{\mathrm{sob}} = 10^{-3}$, $\lambda_{\mathrm{pg}} = 10^{-2}$, $\lambda_{\mathrm{gc}} = 0$, $\lambda_{\mathrm{wd}} = 10^{-3}$, 30{,}000 epochs.
+	In $\btheta$-space (without reparameterisation), the original G9 configuration uses $\lambda_{\mathrm{pg}} = 5 \times 10^{-2}$.
+	
+	The training pipeline has three phases: a warmup phase (first 25\% of epochs) with AiO loss only, then the full loss including gradient penalties for the remaining 75\%.
+	This allows the network to first learn approximate function values before being constrained on gradients.
+	
+	\subsection{Supervised Pretraining}
+	\label{sec:pretrain}
+	
+	Before AiO training, the neural solver is warm-started by training on targets from the 2nd-order perturbation solution.
+	The pretraining uses dimension-dependent defaults (via \code{pretrain\_defaults}), including a pool of parameter vectors drawn from the inflated posterior, cosine learning rate decay, early stopping with patience, curriculum learning (first-order-only targets for an initial phase, then full 2nd-order), and periodic state-grid refresh to prevent overfitting.
+	
+	Pretraining is \emph{essential}: it initialises the network near the true policy surface, reducing the burden on unsupervised AiO training.
+	Without pretraining, the AiO loss landscape has poor local minima.
+	
+	\subsection{Coefficient Extraction Methods}
+	\label{sec:coeff_extract}
+	
+	After training, the neural solver must produce a \code{ModelSolution} object (containing $g_x$, $G_{xx}$, $g_{ss}$, etc.) for downstream use by the UKF and HMC pipeline.
+	Three methods are available, selected via \code{solve\_method}:
+	
+	\paragraph{Finite-difference stencil (\code{solve\_fd}).}
+	Uses $1 + 2n_s^2$ probe points arranged as central differences and cross-differences.
+	XLA-safe (no GradientTape calls).
+	Best for small state dimensions ($n_s \leq 3$).
+	
+	\paragraph{Autodiff Jacobian + FD Hessian (\code{solve\_autodiff}).}
+	Uses exact autodiff for the Jacobian $g_x$ and central FD of the Jacobian for the Hessian $G_{xx}$.
+	Cost: $1 + 2n_s$ autodiff probes.
+	
+	\paragraph{Ridge-regression Hessian (\code{solve\_regression}, default).}
+	Uses FD for the Jacobian (same as \code{solve\_fd}) and then fits the Hessian via ridge regression on random samples near the origin.
+	The procedure subtracts the known constant and linear terms from the neural network output, then regresses the residual on a quadratic design matrix.
+	This avoids the numerical instability of $h^4$ denominators in pure FD.
+	Cost: single batched NN call with $1 + 2n_s + N$ inputs, where $N \approx 1.5 n_s^2$.
+	Fully JIT-safe.
+	Scales to $n_s = 30$ (NAWM-class models).
+	
+	
+	%======================================================================
+	\section{Gradient Regularisation}
+	\label{sec:regularisation}
+	%======================================================================
+	
+	\subsection{The Gradient Quality Problem}
+	\label{sec:gradient_problem}
+	
+	HMC requires $\nabla_{\btheta} \log p(\btheta|Y)$.
+	A key insight: \emph{a neural network can have very accurate function values but very noisy derivatives.}
+	The policy function might predict $y(\btheta) = 0.032$ accurately, but $\partial y/\partial \kappa$ might fluctuate wildly.
+	This is because training minimises a loss involving $\Pi_{\bpsi}$ but places no direct constraint on $\partial\Pi_{\bpsi}/\partial\btheta$.
+	
+	The central challenge is therefore: \emph{train $\Pi_{\bpsi}$ such that not only $\Pi_{\bpsi} \approx \Pi$, but also $\nabla_{\btheta} \Pi_{\bpsi} \approx \nabla_{\btheta} \Pi$ throughout the posterior support.}
+	
+	Two complementary approaches address this: working in the right parameter space (canonical reparameterisation, Section~\ref{sec:reparam}), and explicitly regularising the gradients (this section).
+	
+	\subsection{Sobolev Regularisation}
+	\label{sec:sobolev}
+	
+	\begin{equation}\label{eq:sobolev}
+		\mathcal{L}_{\mathrm{sob}} = \E_{x,\btheta}\!\left[\left\|\frac{\partial R}{\partial \btheta}\right\|_F^2\right].
+	\end{equation}
+	
+	Estimated via the double Hutchinson estimator:
+	\begin{equation}\label{eq:double_hutch}
+		\|A\|_F^2 = \E_{\bw,\bv}\!\left[\left(\bw^\top A \bv\right)^2\right],
+	\end{equation}
+	where $\bw \sim \mathcal{N}(0, I_{n_e})$ and $\bv \sim \mathcal{N}(0, I_{n_\theta})$.
+	Typically 2 random projections are used per epoch.
+	
+	In $\btheta$-space, Sobolev reduces divergences from $\sim$129 (no regularisation) to $\sim$6 but is not sufficient.
+	Under canonical reparameterisation, Sobolev alone achieves 0 divergences (configuration R1: $\hat{R} = 1.035$, ESS $= 255$).
+	The mechanism: in $\psi$-space, the Frobenius penalty equally weights all decorrelated parameter directions, whereas in $\btheta$-space the penalty is dominated by loosely-constrained parameters.
+	
+	\subsection{Perturbation Gradient Regularisation (PG)}
+	\label{sec:pg}
+	
+	\begin{equation}\label{eq:pg_loss}
+		\mathcal{L}_{\mathrm{pg}} = \sum_{c=1}^{n_c} \E_{x,\btheta}\!\left\|\frac{\partial \Pi_{{\bpsi},c}}{\partial \btheta} - \frac{\partial \Pi_{\mathrm{pert},c}}{\partial \btheta}\right\|^2.
+	\end{equation}
+	
+	PG provides a \emph{specific, smooth target} for the neural network's parameter gradients, computed from the analytical perturbation solution.
+	The perturbation gradients $\partial\Pi_{\mathrm{pert}}/\partial\btheta$ are computed using TensorFlow autodiff through the analytical perturbation formulas implemented in \code{\_perturbation\_output\_tf}.
+	
+	PG is the \emph{single most effective gradient regularisation technique} tested.
+	Under canonical reparameterisation with $\lambda_{\mathrm{pg}} = 10^{-2}$, it achieves 0 divergences, $\hat{R} = 1.018$, ESS $= 283$ (configuration R3).
+	
+	PG requires a perturbation solution, which is available for standard DSGE models but may be inaccurate for highly nonlinear models or models with occasionally binding constraints.
+	For such models, the finding that Sobolev-only passes under reparameterisation (R1) provides an important fallback.
+	
+	\subsection{Gradient-Consistency Loss (GC)}
+	\label{sec:gc}
+	
+	Derived from the implicit function theorem: differentiating $\E[R] = 0$ with respect to $\btheta$ gives $\E[\nabla_{\btheta}R] = 0$.
+	\begin{equation}\label{eq:gc_loss}
+		\widetilde{\mathcal{L}}(\bpsi) = \E_{x,\btheta}\!\left[\left\|\E_\varepsilon\!\left[\nabla_{\btheta} g\right]\right\|^2\right].
+	\end{equation}
+	Estimated via AiO debiasing: $\widetilde{\mathcal{L}} \approx \E[(\nabla_{\btheta} g^{(1)})^\top (\nabla_{\btheta} g^{(2)})]$.
+	
+	GC enforces a \emph{necessary condition} (the policy gradient must satisfy the differentiated Euler equation), whereas PG provides a \emph{sufficient target} (match the known perturbation gradient).
+	A necessary condition has many solutions, while PG pins down the specific smooth solution.
+	Accordingly, GC is consistently weaker than PG in experiments, both in $\btheta$-space (G11: 3 divergences) and under reparameterisation (R2: 6 divergences).
+	
+	GC may be valuable for models where the perturbation approximation is poor, as it provides model-consistent gradient regularisation without relying on an external approximation.
+	
+	
+	%======================================================================
+	%  PART III: STATISTICAL INFERENCE
+	%======================================================================
+	
+	\part{Statistical Inference}
+	
+	%======================================================================
+	\section{State-Space Models and Filtering}
+	\label{sec:filtering}
+	%======================================================================
+	
+	\subsection{The DSGE State-Space Form}
+	\label{sec:ss_form}
+	
+	The second-order perturbation solution produces a nonlinear state-space model.
+	
+	\paragraph{Naive (unpruned) transition:}
+	\begin{equation}\label{eq:ss_trans}
+		x_t = h_x \, x_{t-1} + \tfrac{1}{2} H_{xx}(x_{t-1} \otimes x_{t-1}) + \tfrac{1}{2} h_{ss} + \eta\, \varepsilon_t.
+	\end{equation}
+	
+	\paragraph{Observation:}
+	\begin{equation}\label{eq:ss_obs}
+		y_t^{\mathrm{obs}} = g_x \, x_t + \tfrac{1}{2} G_{xx}(x_t \otimes x_t) + \tfrac{1}{2} g_{ss} + e_t, \quad e_t \sim \mathcal{N}(0, R).
+	\end{equation}
+	
+	\paragraph{The instability problem.}
+	Using \eqref{eq:ss_trans} directly for filtering is numerically dangerous for models of moderate or large dimension.
+	The Kronecker product $x_{t-1} \otimes x_{t-1}$ feeds back quadratically into $x_t$, which then enters the next Kronecker product.
+	This creates explosive variance growth: for the SGU model ($n_s = 7$, $H_{xx} \in \mathbb{R}^{7 \times 49}$, $\|H_{xx}\| \approx 604$), the augmented state-space matrix of the equivalent linear filter has large spectral radius, causing immediate numerical divergence.
+	The same problem afflicts both the Augmented Kalman Filter (which expands the state to $[x, \text{vec}(xx'), \tilde{x}]$ of dimension $n_s + n_s^2 + n_s$) and the standard (unpruned) UKF that propagates sigma points through the full nonlinear transition.
+	
+	\subsection{Pruned Second-Order State-Space}
+	\label{sec:pruned_ss}
+	
+	The solution to the instability problem is the \emph{pruned} decomposition of Kim, Kim, Schaumburg \& Sims~\cite{kim2008calculating} and Andreasen, Fern\'{a}ndez-Villaverde \& Rubio-Ram\'{i}rez~\cite{andreasen2018pruning}.
+	The state is decomposed into a first-order component $x^f_t$ and a second-order correction $x^s_t$:
+	\begin{align}
+		x^f_t &= h_x \, x^f_{t-1} + \eta\, \varepsilon_t, \label{eq:pruned_xf}\\
+		x^s_t &= h_x \, x^s_{t-1} + \tfrac{1}{2} H_{xx}(x^f_{t-1} \otimes x^f_{t-1}) + \tfrac{1}{2} h_{ss}. \label{eq:pruned_xs}
+	\end{align}
+	The full state is recovered as $x_t = x^f_t + x^s_t$.
+	
+	The key insight: only the first-order component $x^f$ enters the Kronecker product in~\eqref{eq:pruned_xs}.
+	Since $x^f$ evolves linearly and is driven by $h_x$ (whose eigenvalues satisfy $|\lambda_i| < 1$ by the Blanchard--Kahn conditions), the quadratic forcing term $H_{xx}(x^f \otimes x^f)$ remains bounded.
+	The correction $x^s$ is then driven by $h_x x^s$ (stable) plus a bounded forcing term---no explosive self-feedback.
+	
+	The corresponding pruned observation equation uses $x^f + x^s$ for the linear part but only $x^f$ for the quadratic:
+	\begin{equation}\label{eq:pruned_obs}
+		y_t^{\mathrm{obs}} = g_x\,(x^f_t + x^s_t) + \tfrac{1}{2} G_{xx}(x^f_t \otimes x^f_t) + \tfrac{1}{2} g_{ss} + e_t.
+	\end{equation}
+	
+	This is exactly the decomposition used in the \code{simulate} method (\code{base.py}) and, for models with moderate $\|H_{xx}\|$, in the \code{PrunedSquareRootUKF} filter class.
+	
+	\subsection{The Kalman Filter}
+	\label{sec:kalman}
+	
+	For first-order models ($H_{xx} = 0$, $G_{xx} = 0$), the state-space is linear and the standard Kalman filter is exact.
+	
+	\paragraph{Predict:}
+	\begin{align}
+		\hat{x}_{t|t-1} &= h_x \, \hat{x}_{t-1|t-1}, \label{eq:kf_xp}\\
+		P_{t|t-1} &= h_x \, P_{t-1|t-1} \, h_x^\top + Q. \label{eq:kf_pp}
+	\end{align}
+	
+	\paragraph{Update:}
+	\begin{align}
+		v_t &= y_t^{\mathrm{obs}} - Z \, \hat{x}_{t|t-1}, \label{eq:kf_innov}\\
+		S_t &= Z \, P_{t|t-1} \, Z^\top + R, \label{eq:kf_S}\\
+		K_t &= P_{t|t-1} \, Z^\top \, S_t^{-1}, \label{eq:kf_K}\\
+		\hat{x}_{t|t} &= \hat{x}_{t|t-1} + K_t \, v_t, \label{eq:kf_xu}\\
+		P_{t|t} &= (I - K_t Z) P_{t|t-1}(I - K_t Z)^\top + K_t R K_t^\top. \label{eq:kf_pu}
+	\end{align}
+	
+	\paragraph{Log-likelihood:}
+	\begin{equation}\label{eq:kf_ll}
+		\ell_t = -\frac{n_y}{2}\log(2\pi) - \frac{1}{2}\log|S_t| - \frac{1}{2}v_t^\top S_t^{-1} v_t.
+	\end{equation}
+	
+	The implementation uses the Cholesky factorisation of $S_t$ for numerical stability, computing $\log|S_t| = 2\sum_i \log L_{ii}$ and the quadratic form via forward substitution.
+	The filter loop is implemented using \code{b.foldl} (which maps to \code{tf.foldl}), creating a single traced loop body rather than unrolling $T$ iterations.
+	
+	\subsection{The Square-Root Unscented Kalman Filter}
+	\label{sec:ukf}
+	
+	For nonlinear models, the Unscented Kalman Filter (UKF) propagates a set of deterministically chosen sigma points through the nonlinear dynamics, capturing mean and covariance to second order without explicit Jacobian computation~\cite{vandermerwe2001}.
+	
+	\paragraph{Sigma-point parameters.}
+	Given an $L$-dimensional state, $2L+1$ sigma points are generated with parameters $\alpha = 1$, $\beta_{\mathrm{UKF}} = 2$, $\kappa = \max(0, 3 - L)$, giving $\lambda = \alpha^2(L + \kappa) - L$ and $\gamma = \sqrt{L + \lambda}$:
+	\begin{equation}\label{eq:sigma_pts}
+		\mathcal{X}_0 = \hat{x}, \quad \mathcal{X}_i = \hat{x} + \gamma \, S_{:,i}, \quad \mathcal{X}_{L+i} = \hat{x} - \gamma \, S_{:,i},
+	\end{equation}
+	where $S$ is the Cholesky factor of the state covariance ($P = SS^\top$).
+	The mean weights are $w^m_0 = \lambda/(L+\lambda)$, $w^m_i = 1/(2(L+\lambda))$, and the covariance weights are $w^c_0 = w^m_0 + 1 - \alpha^2 + \beta_{\mathrm{UKF}}$, $w^c_i = w^m_i$.
+	With $\alpha = 1$, the central covariance weight $w^c_0$ is guaranteed positive.
+	
+	\paragraph{Square-root formulation.}
+	The ``square-root'' formulation~\cite{vandermerwe2001} maintains numerical stability by working directly with the Cholesky factor $S$ rather than the full covariance $P$:
+	\begin{itemize}
+		\item \textbf{Predict:} After propagating sigma points through the transition function, the predicted Cholesky factor is obtained via QR decomposition of the stacked sigma-point residuals and process noise Cholesky factor.
+		Since $w^c_0 > 0$ (with $\alpha = 1$), the central sigma point residual can be folded into the QR factorisation rather than requiring a separate rank-1 update.
+		\item \textbf{Update:} The measurement update applies sequential rank-1 Cholesky downdates~\cite{gill1974methods}, one for each observation dimension.
+	\end{itemize}
+	
+	\paragraph{General-dimension Cholesky downdate.}
+	Given a lower-triangular $L$ with $LL^\top = P$ and a vector $v$, the rank-1 downdate computes $\bar{L}$ such that $\bar{L}\bar{L}^\top = P - vv^\top$.
+	The implementation uses the standard algorithm of Gill, Golub, Murray \& Saunders~\cite{gill1974methods}, implemented as a \code{tf.while\_loop} over column indices $k = 0, \ldots, L-1$.
+	Diagonal and sub-diagonal elements are clamped to a small positive constant ($10^{-12}$) to prevent NaN when the downdate nearly exhausts the available variance.
+	
+	The \code{SquareRootUKF} class implements the unpruned formulation for models where the quadratic terms are small.
+	For models with larger second-order coefficients, the pruned variant described next can be used.
+	
+	\subsection{Pruned Square-Root UKF}
+	\label{sec:pruned_ukf}
+	
+	The \code{PrunedSquareRootUKF} class implements a pruned second-order filter following the state-space decomposition of Kim et~al.~\cite{kim2008likelihood} and Andreasen et~al.~\cite{andreasen2018pruning}.
+	The UKF state is $x^f_t \in \R^{n_s}$ (first-order component); the second-order correction $x^s_t$ is tracked as a deterministic side variable, matching the simulation's data-generating process.
+	
+	\paragraph{Transition.}
+	The first-order component evolves linearly, so the UKF sigma-point predict is exact:
+	\begin{align}
+		\hat{x}^f_{t|t-1} &= h_x \, x^f_{t-1|t-1}, \label{eq:pukf_xf}\\
+		P^f_{t|t-1} &= h_x \, P^f_{t-1|t-1} \, h_x^\top + Q_f, \label{eq:pukf_pf}
+	\end{align}
+	where $Q_f = \eta\eta^\top + \epsilon I$.
+	
+	\paragraph{Observation (UKF sigma-point update).}
+	The observation equation is nonlinear in $x^f$ through the $\text{kron}(x^f, x^f)$ term.
+	Rather than linearising (as in an EKF), sigma points $\{\chi^{(i)}\}$ are generated from $(\hat{x}^f_{t|t-1}, S^f_{t|t-1})$ and propagated through the full observation function:
+	\begin{equation}\label{eq:pukf_obs}
+		y^{(i)} = g_x(\chi^{(i)} + x^s_t) + \tfrac{1}{2} G_{xx}(\chi^{(i)} \otimes \chi^{(i)}) + \tfrac{1}{2} g_{ss},
+	\end{equation}
+	where $x^s_t$ is a fixed offset (the same for all sigma points).
+	The predicted observation $\hat{y}_t$, innovation covariance $S_y$, and cross-covariance $P_{xy}$ are then computed from the sigma-point statistics, and the standard SR-UKF update formulae give $x^f_{t|t}$ and $S^f_{t|t}$.
+	
+	\paragraph{Deterministic $x^s$ update.}
+	After the Kalman update, $x^s$ is updated from the filtered $x^f$ mean:
+	\begin{equation}\label{eq:pukf_xs}
+		x^s_{t+1} = \text{clip}\!\Big(h_x \, x^s_t + \tfrac{1}{2} H_{xx}(\hat{x}^f_{t|t} \otimes \hat{x}^f_{t|t}) + \tfrac{1}{2} h_{ss},\; -C,\; C\Big),
+	\end{equation}
+	where $\hat{x}^f_{t|t}$ is the filtered posterior mean and $C = 50$ matches the state clipping in \code{simulate()}.
+	The point estimate $\hat{x}^f_{t|t} \otimes \hat{x}^f_{t|t}$ (rather than $\E[x^f \otimes x^f] = \hat{x}^f \hat{x}^{f\top} + P^f$) is used to match the simulation's realised dynamics.
+	
+	\paragraph{Initial conditions.}
+	Both $x^f$ and $x^s$ are initialised to zero, with $P^f_0$ set to the steady-state covariance of the first-order system.
+	
+	\paragraph{Applicability and limitations.}
+	The filter requires that $\|H_{xx}\|$ and $\|G_{xx}\|$ be moderate so that Kalman estimation errors in $x^f$---which are of order $\|P^f\|^{1/2}$---do not get explosively amplified through the Kronecker product:
+	\begin{equation}\label{eq:pukf_stability}
+		\text{Stability requires } \|H_{xx}\| \cdot \|P^f_0\|^{1/2} \ll 1.
+	\end{equation}
+	For the SmallNK model with \code{nl\_scale} $\leq 5$, this condition is satisfied and the pruned UKF agrees closely with the full UKF (relative log-likelihood difference $< 0.01\%$).
+
+	For models with very large $\|H_{xx}\|$---notably the SGU model where $\|H_{xx}\| \approx 604$ and $\|G_{xx}\| \approx 2{,}731$ (see Section~\ref{sec:sgu_hxx})---the Kronecker term amplifies even small estimation errors by a factor of hundreds, causing $x^s$ to saturate at the clipping boundary immediately.
+	The resulting observation bias destabilises the filter within a few steps.
+	This is a fundamental limitation of all Kalman-type filters (EKF, UKF, or pruned variants) for strongly nonlinear second-order models.
+	
+	\begin{center}
+		\begin{tabular}{lccl}
+			\toprule
+			\textbf{Filter} & \textbf{State dim.} & \textbf{Method} & \textbf{Applicability} \\
+			\midrule
+			KalmanFilter & $n_s$ & Linear KF & First-order models \\
+			SquareRootUKF & $n_s$ & UKF (sigma pts) & Moderate nonlinearity \\
+			PrunedSquareRootUKF & $n_s$ (UKF) & Pruned UKF & Moderate $\|H_{xx}\|$ \\
+			Particle filter & $n_s$ & Sequential MC & Any (future work) \\
+			\bottomrule
+		\end{tabular}
+	\end{center}
+	
+	Following standard practice in the DSGE literature \cite{fernandezvillaverde2007estimating}, the SGU tutorials use first-order perturbation for filtering and estimation.
+	For second-order SGU, alternatives include a particle filter (sequential Monte Carlo) or the joint estimation approach of Childers et~al.~\cite{childers2024} described in Section~\ref{sec:joint_estimation}.
+	
+	\subsection{Measurement Noise Specification}
+	\label{sec:meas_noise}
+	
+	The measurement noise covariance is $R = \sigma_{\mathrm{obs}}^2 I_{n_y}$, where $n_y$ is the number of observed series entering the likelihood.
+	For the three-equation NK tutorial models, the code often uses $\sigma_{\mathrm{obs}}^2 = 10^{-4}$ and $n_y = 2$ (output and inflation), so $R = 10^{-4} I_2$.
+	For the SGU open-economy specification used in estimation, $n_y = 3$ (GDP, current account, interest rate) and tutorials may use $\sigma_{\mathrm{obs}}^2 \approx 10^{-3}$; the exact scalar is a modelling choice, but the \emph{dimension} $n_y$ must match $Z$ and the data matrix.
+	Neural wrappers that reuse a \code{ModelSolution} template must overwrite $R_{\mathrm{obs}}$ with an identity of the correct size (Section~\ref{sec:pitfall_akf_r}).
+	
+	
+	%======================================================================
+	\section{Bayesian Estimation}
+	\label{sec:estimation}
+	%======================================================================
+	
+	\subsection{Parameter Transforms and Prior Specification}
+	\label{sec:transforms}
+	
+	HMC operates in unconstrained space $u \in \R^9$.
+	Each parameter $\theta_j$ is obtained from $u_j$ through a \emph{bijective transform} $\theta_j = T_j(u_j)$ chosen so that $\theta_j$ always lies in its admissible domain.
+	The transforms are defined in \code{SmallNKModel.transform\_from\_unconstrained} and are: scaled sigmoid for $\beta$; softplus for $\kappa$, $\sigma_c$, $\phi_y$, $\sigma_a$, $\sigma_v$; shifted softplus for $\phi_\pi$; and $\tanh$ for $\rho_a$, $\rho_v$.
+	
+	The prior in unconstrained space is:
+	\begin{equation}\label{eq:prior_unconstrained}
+		p(u) = \prod_{j=0}^{8} \mathcal{N}(u_j \mid 0, \sigma^2_{\mathrm{prior}}), \qquad \sigma_{\mathrm{prior}} = 2.
+	\end{equation}
+	
+	The total log-posterior (the function whose gradient HMC requires) is:
+	\begin{equation}\label{eq:log_posterior}
+		\log p(u | Y) = \underbrace{\log p(Y | \btheta(u))}_{\text{log-likelihood from filter}} + \underbrace{\sum_{j=0}^{8} \log \mathcal{N}(u_j | 0, \sigma^2_{\mathrm{prior}})}_{\text{log-prior in } u\text{-space}} + \text{const}.
+	\end{equation}
+	
+	There is no explicit Jacobian correction term because HMC operates entirely in $u$-space.
+	The transform $\btheta(u)$ is embedded inside the likelihood: the code calls \code{transform\_from\_unconstrained(u)} to get $\btheta$, then computes the likelihood given $\btheta$.
+	
+	\subsection{Hamiltonian Monte Carlo}
+	\label{sec:hmc}
+	
+	Hamiltonian:
+	\begin{equation}\label{eq:hamiltonian}
+		H(u, p) = -\log p(u|Y) + \frac{1}{2} p^\top M^{-1} p.
+	\end{equation}
+	
+	\subsubsection{The Leapfrog Integrator}
+	\label{sec:leapfrog}
+	
+	\begin{align}
+		p_{t+1/2} &= p_t + \frac{\epsilon}{2}\nabla_u \log p(u_t | Y), \label{eq:lf1}\\
+		u_{t+1} &= u_t + \epsilon \, M^{-1} p_{t+1/2}, \label{eq:lf2}\\
+		p_{t+1} &= p_{t+1/2} + \frac{\epsilon}{2}\nabla_u \log p(u_{t+1} | Y). \label{eq:lf3}
+	\end{align}
+	
+	The leapfrog integrator is \emph{symplectic} (preserves volume) and \emph{time-reversible}, with energy error $O(\epsilon^2)$.
+	
+	\subsubsection{Divergent Transitions}
+	\label{sec:divergences}
+	
+	A \emph{divergent transition} occurs when the energy error $|\Delta H|$ exceeds a threshold, indicating that the leapfrog integrator encountered a region of very high curvature.
+	In the code, the threshold is applied to the log-acceptance ratio: samples where $\log \alpha < -1000$ are flagged as divergent.
+	Divergent transitions are always rejected but counted for diagnostics.
+	
+	The fundamental mechanism: the Hessian of the log-posterior involves second derivatives of the neural policy with respect to $\btheta$.
+	If these are irregular, the curvature changes discontinuously along the leapfrog trajectory, causing energy divergence.
+	This is why gradient regularisation targets the \emph{smoothness} of $\partial\Pi/\partial\btheta$, not just the accuracy of $\Pi$ itself.
+	
+	\subsubsection{Three-Phase HMC Pipeline (\code{MultiChainHMC})}
+	\label{sec:three_phase}
+	
+	The \code{MultiChainHMC} estimator implements a robust three-phase pipeline using TensorFlow Probability's adaptive HMC kernels:
+	
+	\paragraph{Phase 1 (Probe):} Small leapfrog count ($L = 5$), identity mass matrix.
+	Dual averaging adapts the step size $\epsilon$.
+	Samples are used to estimate preconditioning (offset and scale for each parameter).
+	
+	\paragraph{Phase 2 (Tune):} Reparametrise to $z = (u - \mathrm{offset})/\mathrm{scale}$.
+	Small leapfrog count ($L = 10$), dual averaging restarts in $z$-space.
+	The adapted step size $\epsilon_z$ determines the production leapfrog count:
+	\begin{equation}
+		L_{\mathrm{prod}} = \mathrm{clip}\!\left(\left\lceil\frac{\pi}{\epsilon_z}\right\rceil, L_{\min}, L_{\max}\right).
+	\end{equation}
+	The target trajectory length is $\pi$ (a half-period in preconditioned space where the target $\approx \mathcal{N}(0, I)$), capped at \code{max\_leapfrog}.
+	
+	\paragraph{Phase 3 (Sample):} Production draws with adapted $\epsilon_z$ and $L_{\mathrm{prod}}$.
+	Tracks divergences per chain.
+	Samples are transformed back to $u$-space and then to $\btheta$-space.
+	
+	The pipeline includes safeguards: per-chain garbage collection, step-size retry if acceptance drops below 10\%, adaptive $L$ from the adapted step size, and separate XLA compilations per phase (small $L$ for warmup keeps compilation fast).
+	
+	\subsection{MCMC Diagnostics}
+	\label{sec:diagnostics}
+	
+	Convergence is assessed using three diagnostics following \citet{vehtari2021rank}:
+	
+	\paragraph{Split-$\hat{R}$.}
+	Each chain of $N$ samples is split into two halves, giving $2 \times n_{\mathrm{chains}}$ half-chains.
+	$\hat{R}$ compares within-half-chain variance to between-half-chain variance, computed on rank-normalised samples.
+	The criterion $\hat{R} < 1.01$ indicates convergence (a stricter threshold than the traditional 1.05).
+	
+	\paragraph{Bulk and Tail ESS.}
+	Bulk ESS measures effective sample size for location (from rank-normalised draws).
+	Tail ESS measures ESS for tails (from folded rank-normalised draws).
+	Both use the initial positive sequence estimator for autocorrelation.
+	The criterion ESS $> 400$ per parameter indicates sufficient samples.
+	
+	\paragraph{Divergent transitions.}
+	Zero divergences is the target.
+	Any divergence indicates potential bias.
+	
+	\subsection{Pass/Fail Criteria}
+	\label{sec:pass_fail}
+	
+	A configuration \textbf{passes} if all three hold:
+	\begin{enumerate}[nosep]
+		\item 0 divergent transitions,
+		\item $\hat{R} < 1.05$ for all parameters,
+		\item Minimum bulk ESS $> 50$.
+	\end{enumerate}
+	
+	
+	%======================================================================
+	%  PART IV: EXPERIMENTS AND RESULTS
+	%======================================================================
+	
+	\part{Experiments and Results}
+	
+	%======================================================================
+	\section{Complete Experimental Protocol}
+	\label{sec:protocol}
+	%======================================================================
+	
+	\subsection{Data Generation}
+	\label{sec:datagen}
+	
+	\begin{center}
+		\begin{tabular}{lll}
+			\toprule
+			Setting & Value & Code location \\
+			\midrule
+			True parameters $\btheta_{\mathrm{true}}$ & Eq.~\eqref{eq:theta_true} & \code{tutorial: THETA\_TRUE} \\
+			Sample length $T$ & \textbf{200} & \code{tutorial: T\_OBS = 200} \\
+			Nonlinearity scale & \textbf{2.0} & \code{tutorial: NL\_SCALE=2.0} \\
+			Observed variables & $(y_t, \pi_t)$ & \code{obs\_ix = [0, 1]} \\
+			Random seed (Cases A, B) & \textbf{42} & \code{seed=42} \\
+			Random seed (Case C data) & \textbf{99} & \code{seed=99} \\
+			\bottomrule
+		\end{tabular}
+	\end{center}
+	
+	Cases A and B use data generated with \code{seed=42}; Case C uses \code{seed=99} to avoid look-ahead bias.
+	
+	\subsection{Neural Network Training: Full Hyperparameters}
+	\label{sec:training_hyper}
+	
+	\begin{center}
+		\begin{tabular}{llll}
+			\toprule
+			Hyperparameter & Symbol & Value (R3) & Code location \\
+			\midrule
+			\multicolumn{4}{l}{\textit{Architecture}} \\
+			Hidden layers & $L$ & 2 & \code{ScalablePolicyNetwork} \\
+			Hidden width & $d_h$ & 128 & \code{ScalablePolicyNetwork} \\
+			Activation & $\phi$ & $\tanh$ & \code{ScalablePolicyNetwork} \\
+			Input dimension & $d_{\mathrm{in}}$ & 11 (2 states + 9 params) & \\
+			Output dimension & $d_{\mathrm{out}}$ & 2 ($y, \pi$) & \\
+			Total parameters & $|\bpsi|$ & $\sim$18,000 & \\
+			Reparameterisation & & \textbf{True} (default) & \code{reparam=True} \\
+			\midrule
+			\multicolumn{4}{l}{\textit{Pretraining (supervised)}} \\
+			Pretraining epochs & & dimension-dependent & \code{pretrain\_defaults} \\
+			Pretraining LR & & $3 \times 10^{-3}$ (cosine decay) & \\
+			Pool size & $n_{\mathrm{pool}}$ & 500 & \code{n\_pool} \\
+			LR schedule & & cosine decay to 0 & \\
+			Early stopping patience & & dimension-dependent & \\
+			\midrule
+			\multicolumn{4}{l}{\textit{AiO training}} \\
+			AiO epochs & & \textbf{30,000} & \code{epochs} \\
+			Initial LR & $\alpha_{\max}$ & $10^{-3}$ & \code{lr} \\
+			LR schedule & & cosine decay to $10^{-6}$ & \\
+			Batch size (states) & $B$ & \textbf{512} & \code{batch} \\
+			Warmup fraction & & 0.25 & \code{warmup\_frac} \\
+			Gradient clip norm & $G_{\max}$ & \textbf{10} & \\
+			\midrule
+			\multicolumn{4}{l}{\textit{Loss weights (R3, reparameterised)}} \\
+			AiO weight & & 1 (fixed) & \\
+			Sobolev weight & $\lambda_{\mathrm{sob}}$ & $10^{-3}$ & \code{lam\_sob} \\
+			PG weight & $\lambda_{\mathrm{pg}}$ & $10^{-2}$ & \code{lam\_pg} \\
+			GC weight & $\lambda_{\mathrm{gc}}$ & 0 & \code{lam\_gc} \\
+			Weight decay & $\lambda_{\mathrm{wd}}$ & $10^{-3}$ & \code{weight\_decay} \\
+			\midrule
+			\multicolumn{4}{l}{\textit{Residual balancing}} \\
+			Initial $\ell_j$ & & $0$ (both) & \code{log\_var} \\
+			$\ell_j$ clamp range & & $[-5, 5]$ & \code{max\_log\_var=5.0} \\
+			\bottomrule
+		\end{tabular}
+	\end{center}
+	
+	\subsection{HMC Settings}
+	\label{sec:hmc_settings}
+	
+	\begin{center}
+		\begin{tabular}{llll}
+			\toprule
+			Setting & Value & Code location & Notes \\
+			\midrule
+			Number of chains & \textbf{4} & \code{MultiChainHMC: n\_chains} & \\
+			Warmup samples & \textbf{500} & \code{num\_warmup} & Split across 3 phases \\
+			Production samples & \textbf{500} & \code{num\_results} & Per chain \\
+			Target acceptance rate & $0.65$ & \code{target\_accept} & \\
+			Initial step size & $0.01$ & \code{init\_step\_size} & \\
+			Max leapfrog & auto or 500 & \code{max\_leapfrog} & \\
+			Prior $\sigma_{\mathrm{prior}}$ & 2.0 & & \\
+			\bottomrule
+		\end{tabular}
+	\end{center}
+	
+	
+	%======================================================================
+	\section{Experimental Results}
+	\label{sec:experiments}
+	%======================================================================
+	
+	\subsection{Results Summary}
+	
+	\begin{table}[H]
+		\centering
+		\caption{Selected results from 30 configurations.
+			Div = divergent transitions, $\hat{R}$ = worst split-$\hat{R}$, ESS = minimum bulk ESS.
+			Configurations prefixed R use canonical reparameterisation ($\psi$-space).
+			Each failed configuration is analysed in Section~\ref{sec:failed}.}
+		\label{tab:results}
+		\small
+		\begin{tabular}{llccccl}
+			\toprule
+			\textbf{ID} & \textbf{Key Feature} & \textbf{Div} & $\hat{\mathbf{R}}$ & \textbf{ESS} & \textbf{Time} & \textbf{Status} \\
+			\midrule
+			\multicolumn{7}{l}{\emph{$\btheta$-space (no reparameterisation)}} \\
+			F1 & Sob+Cos+WD, 30k & 6 & 1.058 & 57 & 239s & \textcolor{failred}{FAIL} \\
+			F3 & No Sobolev & 129 & 1.444 & 8 & 167s & \textcolor{failred}{FAIL} \\
+			G2 & MRePU$_2$ activation & 4 & 1.125 & 20 & --- & \textcolor{failred}{FAIL} \\
+			G3 & SIREN ($\omega_0\!=\!30$) & 2 & 2.038 & --- & --- & \textcolor{failred}{FAIL} \\
+			G5 & Pert-corrected arch & 0 & 1.494 & 7 & --- & \textcolor{failred}{FAIL} \\
+			G6 & PG ($\lambda\!=\!10^{-2}$) & 3 & 1.044 & 90 & --- & \textcolor{failred}{FAIL} \\
+			\rowcolor{green!10}
+			\textbf{G9} & \textbf{PG ($\lambda\!=\!5\!\times\!10^{-2}$)} & \textbf{0} & \textbf{1.013} & \textbf{198} & \textbf{240s} & \textbf{\textcolor{passgreen}{PASS}} \\
+			G11 & GC ($\lambda\!=\!5\!\times\!10^{-2}$) & 3 & 1.017 & 113 & 240s & \textcolor{failred}{FAIL} \\
+			G13 & GC + PG combined & 6 & 1.292 & 10 & --- & \textcolor{failred}{FAIL} \\
+			G14 & Spectral norm + PG & 5 & 1.102 & 34 & --- & \textcolor{failred}{FAIL} \\
+			G15 & DCGD + PG & 13 & 1.040 & 92 & 274s & \textcolor{failred}{FAIL} \\
+			G17 & Scale-weighted PG & 8 & 1.095 & 43 & --- & \textcolor{failred}{FAIL} \\
+			\rowcolor{green!10}
+			G19 & PG + NormGrad & 0 & 1.037 & 120 & 261s & \textcolor{passgreen}{PASS} \\
+			\midrule
+			\multicolumn{7}{l}{\emph{$\psi$-space (canonical reparameterisation)}} \\
+			R0 & No regularisation + reparam & 4 & 1.069 & 34 & 293s & \textcolor{failred}{FAIL} \\
+			\rowcolor{green!10}
+			\textbf{R1} & \textbf{Sob-only + reparam} & \textbf{0} & \textbf{1.035} & \textbf{255} & \textbf{365s} & \textbf{\textcolor{passgreen}{PASS}} \\
+			R2 & GC + reparam & 6 & 1.035 & 168 & 326s & \textcolor{failred}{FAIL} \\
+			\rowcolor{green!10}
+			\textbf{R3} & \textbf{PG ($10^{-2}$) + reparam} & \textbf{0} & \textbf{1.018} & \textbf{283} & \textbf{312s} & \textbf{\textcolor{passgreen}{PASS}} \\
+			R4 & PG+GC + reparam & 9 & 1.025 & 152 & 376s & \textcolor{failred}{FAIL} \\
+			R5 & DCGD+PG + reparam & 6 & 1.137 & 18 & 326s & \textcolor{failred}{FAIL} \\
+			R6 & Pert-corr + reparam & 84 & 1.307 & 10 & 343s & \textcolor{failred}{FAIL} \\
+			\rowcolor{green!10}
+			R7 & PG + normgrad + reparam & 0 & 1.037 & 65 & 328s & \textcolor{passgreen}{PASS} \\
+			\bottomrule
+		\end{tabular}
+	\end{table}
+	
+	\subsection{Impact of Canonical Reparameterisation}
+	
+	The reparameterisation results reveal that the gradient quality problem is primarily a \emph{parameter-space geometry} issue, not a network expressiveness issue.
+	Configuration R0 (no regularisation, reparam only) reduces divergences from 129 to 4---a 32-fold improvement from changing only the coordinate system.
+	
+	The most striking finding is R1: Sobolev-only + reparam achieves 0 divergences and passes all diagnostics, whereas the same Sobolev-only configuration in $\btheta$-space (F1) had 6 divergences and failed.
+	This means neural DSGE solvers may be viable even for models without a perturbation solution, using only the model-free Sobolev penalty combined with canonical reparameterisation.
+	
+	Under reparameterisation, the optimal PG weight decreases from $5 \times 10^{-2}$ to $10^{-2}$.
+	This is expected: in $\psi$-space the PG penalty is already well-scaled across parameters, so less regularisation is needed.
+	
+	\subsection{Multi-Seed Robustness}
+	
+	A 3-seed comparison found:
+	
+	\begin{center}
+		\begin{tabular}{lcccc}
+			\toprule
+			\textbf{Solver} & \textbf{Div} & $\hat{\mathbf{R}}$ & \textbf{ESS} & \textbf{RMSE} \\
+			\midrule
+			$\btheta$-space, PG $10^{-2}$ & $45 \pm 31$ & $1.035 \pm 0.022$ & $150 \pm 85$ & $0.295 \pm 0.009$ \\
+			\rowcolor{green!10}
+			\textbf{$\psi$-space, PG $10^{-2}$} & $\mathbf{5 \pm 4}$ & $\mathbf{1.013 \pm 0.007}$ & $\mathbf{630 \pm 533}$ & $\mathbf{0.247 \pm 0.002}$ \\
+			\bottomrule
+		\end{tabular}
+	\end{center}
+	
+	The reparameterised solver achieves a 9$\times$ reduction in divergences, significantly better chain convergence, and 6$\times$ lower RMSE variability.
+	
+	\subsection{GPU vs CPU Training}
+	
+	GPU training produces 38 divergences for the same G9 configuration that achieves 0 on CPU.
+	The cause is subtle float64 rounding differences in GPU arithmetic (different operation ordering, fused multiply-add) that accumulate over 30{,}000 epochs, producing a slightly different learned policy whose gradient landscape has sharper features.
+	
+	For small models, CPU is preferred.
+	The GPU infrastructure (the \code{migrate\_to\_cpu()} method) is implemented for scaling to larger models where GPU parallelism can offset the precision cost.
+	
+	
+	%======================================================================
+	\section{Detailed Analysis of Failed Approaches}
+	\label{sec:failed}
+	%======================================================================
+	
+	This section provides a self-contained description of every non-trivial approach that was tested and failed, explaining each algorithm from first principles and precisely identifying the mechanism by which it fails.
+	Where applicable, we note whether the conclusion changed under canonical reparameterisation.
+	
+	%----------------------------------------------------------------------
+	\subsection{Dual-Cone Gradient Descent (DCGD)}
+	\label{sec:dcgd_alg}
+	%----------------------------------------------------------------------
+	
+	DCGD \citep{dcgd_ref} addresses gradient conflict by modifying each task's gradient so that it never increases any other task's loss.
+	For two objectives ($\mathcal{L}_{\mathrm{AiO}}$ and $\mathcal{L}_{\mathrm{grad}}$), DCGD projects the update onto the bisector of the two normalised gradient vectors.
+	
+	DCGD fails because the loss components are \emph{complementary}, not adversarial: at the true policy function, all losses are simultaneously zero.
+	Any observed ``conflict'' during training is transient stochastic noise.
+	The projection destroys useful gradient information by removing components that are only momentarily conflicting due to mini-batch noise, and the AiO loss's inherent stochasticity causes the projected gradient to rotate randomly from batch to batch.
+	
+	Configuration G15 (DCGD + PG) produces 13 divergences in $\btheta$-space.
+	Under reparameterisation (R5), DCGD still fails with 6 divergences and $\hat{R} = 1.137$, confirming that the complementary-objective argument holds regardless of parameter space.
+	
+	%----------------------------------------------------------------------
+	\subsection{Parameter-Scale-Weighted Gradient Penalties}
+	\label{sec:scale_weight}
+	%----------------------------------------------------------------------
+	
+	Weighting the PG penalty by the posterior standard deviation $\hat{\sigma}_j^2$ was expected to focus regularisation on directions HMC explores.
+	This reasoning is backwards: tightly constrained parameters (small $\hat{\sigma}_j$) have high Fisher information and high curvature, making them the directions where HMC is most sensitive to gradient noise.
+	Scale-weighted PG \emph{down-weights} exactly where regularisation is most needed.
+	
+	Configuration G17 produces 8 divergences.
+	Under canonical reparameterisation, diagonal scaling (\code{normalise\_grad}) becomes redundant (R7 produces identical $\hat{R} = 1.037$ to G19) because the full-covariance reparameterisation already provides the optimal scaling and decorrelation.
+	The original failure of diagonal normalisation was due to ignoring correlations and using the wrong scaling direction, not due to normalisation being inherently harmful.
+	
+	%----------------------------------------------------------------------
+	\subsection{SIREN (Sinusoidal Representation Networks)}
+	\label{sec:siren}
+	%----------------------------------------------------------------------
+	
+	SIREN uses $\sin(\omega_0 z)$ activations.
+	It fails for two reasons: spectral bias mismatch (the true policy is nearly linear, but SIREN's oscillatory basis must cancel oscillations through careful interference, making the cancellation fragile) and gradient amplification (the $\omega_0$ factor multiplies every Jacobian, amplifying derivative errors by $O(\omega_0)$ relative to function errors).
+	
+	Configuration G3 ($\omega_0 = 30$) produces 2 divergences but catastrophic mixing ($\hat{R} = 2.038$).
+	The sinusoidal basis creates oscillatory gradients that corrupt the entire posterior landscape, causing HMC to mix extremely slowly.
+	
+	%----------------------------------------------------------------------
+	\subsection{MRePU (Multiply ReLU Power Units)}
+	\label{sec:mrepu}
+	%----------------------------------------------------------------------
+	
+	MRePU$_2$ uses $\phi(z) = \max(0, z)^2$, which is $C^1$ but not $C^2$.
+	The second-derivative discontinuity at $z = 0$ propagates through the chain rule to create discontinuities in the Hessian of the log-posterior, which the leapfrog integrator cannot handle with a fixed step size.
+	
+	Configuration G2 produces 4 divergences.
+	For gradient-based MCMC, $C^\infty$ activations ($\tanh$) are strongly preferred.
+	
+	%----------------------------------------------------------------------
+	\subsection{Spectral Normalisation}
+	\label{sec:specnorm}
+	%----------------------------------------------------------------------
+	
+	Constraining each weight matrix to have spectral norm $\leq 1$ bounds the network's maximum sensitivity but is too restrictive: it forces the network to ``flatten'' its response, preventing faithful representation of the true policy's sensitivity to parameters.
+	Additionally, the Lipschitz bound addresses gradient \emph{magnitude} but not gradient \emph{smoothness}, and the post-update projection can undo training progress.
+	
+	Configuration G14 produces 5 divergences.
+	
+	%----------------------------------------------------------------------
+	\subsection{Perturbation-Corrected Architecture}
+	\label{sec:pert_corrected}
+	%----------------------------------------------------------------------
+	
+	Learning a correction $\Pi_{\bpsi} = \Pi_{\mathrm{pert}} + \delta\Pi_{\mathrm{NN}}$ ensures smooth base gradients, but the correction's $\btheta$-gradients are uncontrolled and can oscillate wildly (a function with small values can have large derivatives).
+	
+	In $\btheta$-space, G5 achieves 0 divergences but terrible mixing ($\hat{R} = 1.494$, ESS $= 7$).
+	Under reparameterisation (R6), the architecture \emph{degrades catastrophically} to 84 divergences.
+	The cause is a parameter-space mismatch: the perturbation base operates in $\btheta$-space while the NN correction operates in $\psi$-space, creating gradient artefacts from the additional $\psi \to \btheta$ conversion inside the correction path.
+	
+	\textbf{Do not combine perturbation-corrected architecture with canonical reparameterisation.}
+	
+	%----------------------------------------------------------------------
+	\subsection{Combined GC + PG Regularisation}
+	\label{sec:gc_pg}
+	%----------------------------------------------------------------------
+	
+	Combining GC and PG produces worse results than PG alone, both in $\btheta$-space (G13: 6 divergences) and under reparameterisation (R4: 9 divergences).
+	Three mechanisms: gradient budget competition (both terms compete for the clipped gradient norm), different variance profiles (high-variance GC contaminates low-variance PG), and incompatible optima at finite network capacity.
+	
+	More regularisation is not always better.
+	When one regulariser (PG) provides a strong, specific, low-variance signal, adding a weaker, noisier regulariser (GC) degrades the result.
+	
+	%----------------------------------------------------------------------
+	\subsection{AiO-Only Training Without Regularisation}
+	\label{sec:no_reg}
+	%----------------------------------------------------------------------
+	
+	F3 (no regularisation, $\btheta$-space) produces 129 divergences.
+	R0 (no regularisation, $\psi$-space) produces 4 divergences.
+	The 32-fold improvement from reparameterisation alone confirms that the gradient quality problem is primarily a parameter-space geometry issue.
+	However, even under reparameterisation, some gradient regularisation is needed to reach zero divergences.
+	
+	%----------------------------------------------------------------------
+	\subsection{Summary: Taxonomy of Failure Modes}
+	\label{sec:failure_taxonomy}
+	%----------------------------------------------------------------------
+	
+	The failed approaches fall into four categories based on their failure mechanism.
+	
+	\emph{Category 1: Insufficient gradient constraint.}
+	F3 (no regularisation) and F1 (Sobolev only, $\btheta$-space).
+	The fix is PG regularisation and/or canonical reparameterisation.
+	Under reparameterisation, Sobolev alone becomes sufficient (R1).
+	
+	\emph{Category 2: Misguided gradient modification.}
+	DCGD (G15, R5) and scale-weighted PG (G17).
+	These modify the training gradient in harmful ways.
+	Confirmed under reparameterisation.
+	
+	\emph{Category 3: Architectural mismatch.}
+	SIREN (G3), MRePU (G2), spectral normalisation (G14), and perturbation-corrected + reparam (R6).
+	The fix is standard $\tanh$ architecture without constraints, and not combining perturbation-corrected architecture with reparameterisation.
+	
+	\emph{Category 4: Regularisation interference.}
+	Combined GC + PG (G13, R4).
+	Use only the single most effective regulariser (PG).
+	
+	
+	%======================================================================
+	\section{Tutorial Results: Three Approaches Compared}
+	\label{sec:tutorial}
+	%======================================================================
+	
+	The tutorial (\code{tutorial\_neural\_dsge.py}) compares three approaches on $T = 200$ observations from a nonlinear NK model (\code{nl\_scale} $= 2.0$):
+	
+	\begin{center}
+		\begin{tabular}{llll}
+			\toprule
+			& \textbf{Case A} & \textbf{Case B} & \textbf{Case C} \\
+			\midrule
+			DGP & Linear (\code{nl\_scale=0}) & Nonlinear & Nonlinear \\
+			Solver & 1st-order pert & 2nd-order pert & Neural (reparam) \\
+			Filter & \code{KalmanFilter} & \code{SquareRootUKF} & \code{SquareRootUKF} \\
+			\bottomrule
+		\end{tabular}
+	\end{center}
+	
+	Case C uses a three-stage pipeline: (1)~a quick perturbation-based HMC to generate theta-samples for the neural solver's training domain, (2)~train the reparameterised neural solver with PG regularisation, and (3)~full multi-chain HMC using the neural model.
+	The neural solver is wrapped in a \code{NeuralSmallNKModel} subclass whose \code{solve()} method delegates to the trained \code{ConditionedNeuralNKSolver}.
+	
+	
+	%======================================================================
+	\section{Lessons and Recommendations}
+	\label{sec:lessons}
+	%======================================================================
+	
+	\subsection{What Works}
+	
+	\begin{enumerate}[nosep]
+		\item \textbf{Canonical reparameterisation} (\code{reparam=True}, default): the single most impactful architectural decision.
+		Decorrelates parameters and equalises gradient scales, reducing divergences 32-fold even without explicit gradient regularisation.
+		The $\sim$10\% training overhead is negligible.
+		\item \textbf{PG regularisation} ($\lambda = 0.01$ under reparam, $\lambda = 0.05$ in $\btheta$-space): the strongest gradient regulariser.
+		Combined with reparameterisation, achieves 0 divergences, $\hat{R} = 1.018$, ESS $= 283$.
+		\item \textbf{Sobolev regularisation under reparameterisation}: sufficient alone (0 divergences, R1).
+		This broadens applicability to models without perturbation solutions.
+		\item \textbf{Supervised pretraining}: initialises the network near the correct solution.
+		Dimension-dependent defaults with cosine LR, early stopping, and curriculum learning.
+		\item \textbf{Residual balancing with clamped log-variance} ($|\ell_j| \leq 5$): prevents IS/NKPC imbalance.
+		\item \textbf{Cosine LR decay + weight decay}: smooth convergence.
+		\item \textbf{$\tanh$ activation}: $C^\infty$ smoothness essential for HMC.
+	\end{enumerate}
+	
+	\subsection{What Does Not Work}
+	
+	\begin{enumerate}[nosep]
+		\item \textbf{DCGD} (Section~\ref{sec:dcgd_alg}): complementary losses defeat the dual-cone projection.
+		Confirmed under reparameterisation (R5).
+		\item \textbf{Scale-weighted PG} (Section~\ref{sec:scale_weight}): superseded by canonical reparameterisation.
+		\item \textbf{SIREN} (Section~\ref{sec:siren}): oscillatory basis creates $O(\omega_0)$ gradient amplification.
+		\item \textbf{MRePU} (Section~\ref{sec:mrepu}): $C^1$-only smoothness creates second-derivative discontinuities.
+		\item \textbf{Spectral normalisation} (Section~\ref{sec:specnorm}): the Lipschitz constraint fights the training gradient.
+		\item \textbf{Perturbation-corrected architecture + reparameterisation} (Section~\ref{sec:pert_corrected}): parameter-space mismatch causes catastrophic regression (R6: 84 divergences).
+		\item \textbf{Combined GC + PG} (Section~\ref{sec:gc_pg}): the noisier GC loss contaminates the cleaner PG signal.
+		Confirmed under reparameterisation (R4).
+		\item \textbf{GPU training for small models}: float64 rounding differences degrade gradient quality.
+	\end{enumerate}
+	
+	\subsection{Corrected Beliefs from Reparameterisation Experiments}
+	
+	Several conclusions from the original $\btheta$-space experiments were revised by the reparameterisation experiments:
+	
+	\emph{``Sobolev regularisation alone is insufficient.''}
+	Corrected: under reparameterisation, Sobolev alone achieves 0 divergences (R1).
+	The original failure was a symptom of the $\btheta$-space geometry, not the Sobolev penalty itself.
+	
+	\emph{``The gradient quality problem is fundamentally about the loss function.''}
+	Corrected: the 32$\times$ improvement from reparameterisation alone (R0) shows that the problem is primarily about parameter-space geometry, with loss function design being secondary.
+	
+	\emph{``Normalising gradient penalties by parameter scale is harmful.''}
+	Partially corrected: diagonal normalisation (scaling by $\sigma_\theta$) went in the wrong direction because it ignored correlations.
+	Full covariance reparameterisation ($M = \Sigma^{1/2}$) goes in the right direction and is dramatically effective.
+	
+	\subsection{Scaling to Large Models}
+	
+	For models like the ECB's NAWM ($n_s \sim 30$, $n_\theta \sim 80$):
+	\begin{enumerate}[nosep]
+		\item Use \code{ScalablePolicyNetwork} auto-architecture with gated residual connections.
+		\item \textbf{Always enable canonical reparameterisation} (\code{reparam=True}).
+		Its value increases with the posterior covariance condition number.
+		\item Use PG regularisation where perturbation is available; Sobolev + reparam as fallback.
+		\item Increase pretraining pool to $\sim$2000 parameter vectors.
+		\item Use \code{solve\_method='regression'}: scales as $O(n_s^2)$ probes.
+		\item Train on GPU (\code{migrate\_to\_cpu()} before HMC for numerical precision).
+		\item For covariance estimation with large $n_\theta$, regularise the posterior covariance (shrinkage) if the preliminary sample is small.
+	\end{enumerate}
+	
+	
+	%======================================================================
+	\section{Complete Code--Equation Cross-Reference}
+	\label{sec:crossref}
+	%======================================================================
+	
+	\begin{center}
+		\small
+		\begin{tabular}{lll}
+			\toprule
+			\textbf{Equation} & \textbf{File} & \textbf{Code location} \\
+			\midrule
+			IS curve, nonlinear \eqref{eq:is_nonlinear} & \code{dsgeneural.py} & \code{\_residuals\_tf}, \code{lhs}/\code{R\_is1} \\
+			NKPC \eqref{eq:nkpc_code} & \code{dsgeneural.py} & \code{\_residuals\_tf}, \code{R\_pc1} \\
+			Taylor rule \eqref{eq:taylor_code} & \code{dsgeneural.py} & \code{\_residuals\_tf}, \code{i\_ = pp*pi + py\_*y + v} \\
+			Char.\ denominator \eqref{eq:denom} & \code{dsgeEZ.py} & \code{\_solve\_first\_order}, \code{denom(r)} \\
+			$g_{ya}$ \eqref{eq:gya_solution} & \code{dsgeEZ.py} & \code{\_solve\_first\_order}, \code{g\_ya} \\
+			AiO loss \eqref{eq:aio_loss} & \code{dsgeneural.py} & \code{step\_sob}, \code{aio} \\
+			Sobolev \eqref{eq:sobolev} & \code{dsgeneural.py} & \code{step\_sob}, \code{sob} \\
+			PG \eqref{eq:pg_loss} & \code{dsgeneural.py} & \code{step\_sob}, \code{pg\_loss} \\
+			GC \eqref{eq:gc_loss} & \code{dsgeneural.py} & \code{step\_sob}, \code{gc\_val} \\
+			Reparameterisation \eqref{eq:reparam_def} & \code{dsgeneural.py} & \code{\_setup\_posterior}, \code{\_M\_np} \\
+			Kalman predict \eqref{eq:kf_xp}--\eqref{eq:kf_pp} & \code{dsgeEZ.py} & \code{KalmanFilter.log\_likelihood} \\
+			UKF sigma pts \eqref{eq:sigma_pts} & \code{dsgeEZ.py} & \code{SquareRootUKF}, \code{gen\_sigma} \\
+			Pruned UKF \eqref{eq:pukf_xf}--\eqref{eq:pukf_obs} & \code{dsgeEZ.py} & \code{PrunedSquareRootUKF} \\
+			Param transforms & \code{dsgeEZ.py} & \code{transform\_from\_unconstrained} \\
+			Log-posterior \eqref{eq:log_posterior} & \code{dsgeEZ.py} & \code{target\_fn} in estimators \\
+			3-phase HMC & \code{dsgeEZ.py} & \code{run\_hmc\_chains} \\
+			Ridge Hessian & \code{dsgeneural.py} & \code{solve\_regression} \\
+			\bottomrule
+		\end{tabular}
+	\end{center}
+	
+	
+	%======================================================================
+	\section{Conclusion}
+	\label{sec:conclusion}
+	%======================================================================
+	
+	This document has presented a complete framework for Bayesian estimation of DSGE models using neural network solvers, from household optimisation through to Hamiltonian Monte Carlo diagnostics.
+	
+	Across 30 systematic experiments (22 in $\btheta$-space + 8 under canonical reparameterisation), we identify two complementary ingredients for a production-quality neural DSGE solver:
+	
+	\textbf{Canonical reparameterisation} ($\psi = M^{-1}(\theta - \theta_{\mathrm{mode}})$, $M = \Sigma^{1/2}$) is the single most impactful architectural decision.
+	It decorrelates parameters and equalises gradient scales, reducing divergences 32-fold even without explicit gradient regularisation.
+	Under reparameterisation, Sobolev regularisation alone passes all diagnostics (0 divergences, $\hat{R} = 1.035$), broadening the applicability of neural DSGE solvers to models without perturbation solutions.
+	
+	\textbf{Perturbation gradient regularisation} (PG, $\lambda = 0.01$ under reparameterisation) provides a specific, smooth, low-variance target for the neural network's parameter derivatives.
+	Combined with reparameterisation, it achieves the best overall results: 0 divergences, $\hat{R} = 1.018$, ESS $= 283$.
+	
+	Several techniques from the PINN literature (DCGD, SIREN, spectral normalisation) remain ineffective regardless of parameter space, confirming that the gradient quality problem in DSGE solvers has a fundamentally different structure from PDE residual networks.
+	The perturbation-corrected architecture is incompatible with reparameterisation and should not be combined.
+	
+	The common thread linking all failures is a violation of a simple principle: \emph{the neural network's derivatives with respect to structural parameters must be smooth and accurate, not just its function values.}
+	The two most effective interventions---working in the right coordinate system (reparameterisation) and directly training the derivatives (PG)---both address this principle directly.
+	
+	For scaling to large-scale models (ECB NAWM: $n_\theta \sim 80$), canonical reparameterisation is expected to become \emph{more} valuable as the posterior covariance condition number grows.
+	The automatic decorrelation provided by the eigendecomposition square root is precisely what high-dimensional samplers need: HMC trajectories in $\psi$-space explore decorrelated, unit-scale directions where the leapfrog integrator is maximally efficient.
+	
+	
+	%======================================================================
+	\section{Engineering Addendum: Pitfalls, Recent Bugs, and How to Avoid Them}
+	\label{sec:pitfalls}
+	%======================================================================
+	
+	This section is for anyone who will \emph{modify} the code or connect a new model to the filters and solvers.
+	It assumes only basic linear algebra (matrix multiply, ``rows must match columns'') and no prior exposure to LAPACK or TensorFlow custom ops.
+	
+	\subsection{The Big Picture: Three Places Shapes Must Agree}
+	
+	When something crashes with a \code{ValueError} about matrix dimensions, almost always one of these three contracts was violated:
+	\begin{enumerate}[leftmargin=*]
+		\item \textbf{Observation equation.} The observation matrix $Z$ in the state-space has shape $(n_y, n_s)$: $n_y$ measured series, $n_s$ state variables.
+		The innovation covariance in the Kalman update is $S = Z P Z^\top + R$.
+		Both terms must be $n_y \times n_y$.
+		If $R$ is built as $r^2 I_{n_y'}$ with the \emph{wrong} $n_y'$, addition fails---this is not a subtle numerical issue; it is literally adding a $3 \times 3$ matrix to a $4 \times 4$ matrix.
+		\item \textbf{Neural vs.\ perturbation models.} A neural wrapper may return a \code{ModelSolution} copied from a perturbation template with a default $R_{\mathrm{obs}}$ sized for a different observation vector than the model actually uses for likelihood.
+		The fix is to set $R$ from the \emph{same} $n_y$ the filter uses (\code{model.n\_observables()}) and a scalar variance the model documents (e.g.\ \code{\_obs\_noise\_var}).
+		\item \textbf{Sylvester equation side.} The second-order solver implements one specific generalized Sylvester form.
+		Verification code must use the \emph{same} transpose convention as the solver and unit tests; mixing up $F$ and $F^\top$ produces residuals of order one even when the C++ code is correct (Section~\ref{sec:sylvester_transpose_pitfall}).
+	\end{enumerate}
+	
+	\subsection{Augmented Kalman Filter and Measurement Noise Size}
+	\label{sec:pitfall_akf_r}
+	
+	\paragraph{What went wrong.}
+	On the neural SGU path, the augmented Kalman filter formed $S = Z P Z^\top + R_{\mathrm{obs}}$.
+	Here $Z$ had $n_y = 3$ rows (GDP, current account, interest rate), but $R_{\mathrm{obs}}$ inherited from a template was $4 \times 4$.
+	TensorFlow correctly refused to add incompatible matrices.
+	
+	\paragraph{Lesson.}
+	$n_y$ is not ``how many controls the neural net outputs''; it is ``how many observables enter the likelihood.''
+	Always build $R$ as $\sigma_{\mathrm{obs}}^2 I_{n_y}$ with $n_y = {}$\code{model.n\_observables()}.
+	The implementation in \code{dsge\_hmc/filters/\_\_init\_\_.py} (\code{AugmentedKalmanFilter}) checks \code{hasattr(model, '\_obs\_noise\_var')} and, when present, overwrites the augmented state's $R$ with that scalar times \code{eye(ny)} so the filter cannot silently use a mismatched template matrix.
+	Tutorials that attach observation matrices after \code{solve()} should also assign \code{sol.R\_obs} explicitly for clarity.
+	
+	\subsection{Sylvester: $F$ versus $F^\top$ in Code and Tests}
+	\label{sec:sylvester_transpose_pitfall}
+	
+	\paragraph{The equation the code actually solves.}
+	Let $F = h_x \otimes h_x$ (Kronecker product, same layout as \code{np.kron(h\_x, h\_x)} and \code{\_tf\_kron} in Python).
+	The custom op \code{MklSylvester} and \code{\_solve\_sylvester\_diag} solve
+	\begin{equation}\label{eq:sylvester_code_convention}
+		A X F + D X + C = 0,
+	\end{equation}
+	with $X \in \R^{n \times n_x^2}$ stored row-wise in the usual NumPy/TensorFlow sense.
+	
+	\paragraph{Equivalent vectorized form (Fortran vector of $X$).}
+	Stack columns of $X$ into a long vector $\mathrm{vec}_F(X)$.
+	Then~\eqref{eq:sylvester_code_convention} is equivalent to
+	\begin{equation}\label{eq:sylvester_kron_form}
+		\bigl( F^\top \otimes A + I_{n_x^2} \otimes D \bigr)\, \mathrm{vec}_F(X) = -\,\mathrm{vec}_F(C).
+	\end{equation}
+	Note the \emph{transpose} on $F$ in the Kronecker product, even though~\eqref{eq:sylvester_code_convention} uses $F$ without transpose on the right of $X$.
+	This is a standard identity $\mathrm{vec}(A X B) = (B^\top \otimes A)\mathrm{vec}(X)$; it confuses everyone the first time.
+	
+	\paragraph{What went wrong in a regression test.}
+	A robustness test checked the residual $A X F^\top + D X + C$.
+	For general non-symmetric $h_x$, $F^\top \neq F$, so that residual is \emph{not} the equation being solved.
+	The test reported a large ``error'' and attempted \code{tape.gradient} through \code{MklSylvester}, but that op has \emph{no} registered TensorFlow gradient (gradients in the full perturbation pipeline use the implicit function theorem elsewhere).
+	The fix was to align the residual check with~\eqref{eq:sylvester_code_convention} and to validate sensitivities w.r.t.\ $C$ with a small implicit-adjoint / finite-difference check instead of reverse-mode autodiff through the op.
+	
+	\paragraph{Lesson.}
+	When verifying the Sylvester solver, copy the residual formula from \code{tests/test\_sylvester\_unit.py} (\code{A @ X @ F + D @ X + C}) and the Kronecker reference from \code{test\_vs\_kron} (\code{np.kron(F.T, A) + np.kron(eye, D)} with \code{C.T.ravel()} ordering).
+	Do not transpose $F$ in the matrix residual unless you have re-derived the entire pipeline.
+	
+	\subsection{LAPACK \code{DGESV} Layout (Why \code{info=-7} Appeared)}
+	
+	The Bartels-Stewart implementation solves many small dense systems $L y = b$ with LAPACK \code{DGESV}.
+	Intel MKL's \code{LAPACKE\_dgesv} in \code{LAPACK\_ROW\_MAJOR} mode validates leading dimensions strictly.
+	Storing the right-hand side as a single column but passing an invalid leading dimension (treating it like a row vector with $\texttt{ldb}=1$ when the Fortran routine effectively requires $\texttt{ldb} \geq n$ after internal layout conversion) produced \code{info=-7} (illegal argument) during HMC when backward mode touched the solver.
+	The robust fix converts the small system matrix to column-major storage and calls \code{LAPACKE\_dgesv(LAPACK\_COL\_MAJOR, \ldots)} with consistent \texttt{lda}, \texttt{ldb}, and $\texttt{nrhs}=1$.
+	
+	\paragraph{Lesson.}
+	Custom op authors should treat ``works for $n=1$'' as a red flag: LAPACK dimension checks often bite only for larger coupled blocks (e.g.\ $2\times 2$ Schur blocks in Bartels-Stewart).
+	
+	\subsection{WSL2, OpenMP, and TensorFlow}
+	
+	On Windows Subsystem for Linux~2, Intel OpenMP sometimes fails to create shared-memory files under \path{/dev/shm}, producing \texttt{OMP: Error \#179} or unexplained aborts when multiple threads start.
+	The project standard is to run Python with \code{OMP\_NUM\_THREADS=1}, \code{KMP\_INIT\_AT\_FORK=FALSE}, and to remove stale \path{__KMP_REGISTERED_LIB_*} files under \path{/dev/shm} before long runs.
+	Large QZ/Sylvester custom ops compiled for XLA may also abort when traced on WSL2; models that need it run parts of the stack in eager mode (\code{eager\_mode=True}) to avoid graph compilation of the largest decompositions.
+	
+	\subsection{Checklist Before You Open a ``Solver Bug'' Issue}
+	
+	\begin{itemize}[leftmargin=*]
+		\item Does \code{model.n\_observables()} match \code{sol.g\_x.shape[0]} and the second dimension of your data matrix?
+		\item Does $R_{\mathrm{obs}}$ have shape $(n_y, n_y)$?
+		\item For second-order Sylvester checks, are you using~\eqref{eq:sylvester_code_convention}, not $F^\top$ on the wrong side?
+		\item For gradients through the standalone Sylvester op: remember there is no registered autodiff; the full model uses IFT-based adjoints in the perturbation stack.
+	\end{itemize}
+	
+	
+	%======================================================================
+	%  APPENDICES
+	%======================================================================
+	
+	\appendix
+	
+	%======================================================================
+	\section{Detailed Documentation of \code{dsgeEZ.py}}
+	\label{app:dsgeEZ}
+	%======================================================================
+	
+	This appendix documents the core framework file.
+	The file is organised into major sections: backend abstraction (\code{BackendRegistry}, \code{TensorFlowBackend}), model classes (\code{SmallNKModel}, \code{EpsteinZinNKModel}, \code{SGUEstimable}), filter classes (\code{KalmanFilter}, \code{AugmentedKalmanFilter}, \code{SquareRootUKF}, \code{PrunedSquareRootUKF}), estimator classes (\code{MAPEstimator}, \code{HMCEstimator}, \code{MultiChainHMC}), diagnostic functions, and plotting utilities.
+	
+	\subsection{Backend and Utility Layer}
+	\label{app:dsgeEZ_backend}
+	
+	\paragraph{\code{BackendRegistry} and \code{B()}.}
+	A registry pattern that stores a single global backend instance.
+	\code{BackendRegistry.set\_backend('tensorflow', precision='float64', force\_cpu=True)} creates a \code{TensorFlowBackend}.
+	The convenience function \code{B()} returns the active backend, used throughout the codebase as \code{b = B()}.
+	
+	\paragraph{\code{TensorFlowBackend} class.}
+	Implements the \code{AbstractBackend} interface with TensorFlow and TensorFlow Probability.
+	All constants and factory methods create tensors on \code{/CPU:0} explicitly to prevent XLA cross-device errors.
+	Pre-allocates frequently-used scalar constants (\code{ZERO}, \code{ONE}, \code{HALF}, \code{LOG2PI}, \code{NUGGET}, \code{BIG\_NEG}) at construction time.
+	When \code{force\_cpu=True} and \code{precision='float64'}, hides all GPUs via \code{tf.config.set\_visible\_devices([], 'GPU')}.
+	
+	\warn{The float64 setting is determined by the backend, not by a global TF setting.
+		All downstream code calls \code{b.tensor()}, \code{b.zeros()}, etc., which use the backend's dtype.
+		This is cleaner than the original approach of setting \code{tf.keras.backend.set\_floatx('float64')} globally.}
+	
+	The \code{compile(fn, jit=True)} method wraps \code{tf.function(fn, jit\_compile=jit)}.
+	When a GPU is visible (but force\_cpu is False), it additionally wraps the compiled function to execute on CPU, preventing cross-device errors for MAP/HMC operations.
+	
+	\subsection{Model Classes}
+	\label{app:dsgeEZ_models}
+	
+	\subsubsection{\code{SmallNKModel}}
+	
+	Inherits from \code{AbstractNonlinearDSGE}.
+	The \code{nl\_scale} attribute is set at construction time: \code{SmallNKModel(nl\_scale=2.0)}.
+	This controls the amplitude of second-order corrections in \code{\_second\_order}.
+	
+	\paragraph{\code{solve(self, theta) -> ModelSolution}.}
+	Calls \code{\_solve\_first\_order} and \code{\_second\_order}, returns a \code{ModelSolution} dataclass containing \code{g\_x}, \code{h\_x}, \code{eta}, \code{G\_xx}, \code{H\_xx}, \code{g\_ss}, \code{h\_ss}, and \code{R\_obs}.
+	The measurement noise $R_{\mathrm{obs}} = 10^{-4} I_2$ is set inside \code{solve()}.
+	
+	\paragraph{\code{build\_augmented\_ssm(self, sol) -> AugmentedStateSpace}.}
+	Constructs the augmented state-space form for the \code{AugmentedKalmanFilter}.
+	The augmented state is $(x_t, x_t \otimes x_t, \tilde{x}_t)$ where $\tilde{x}_t$ accumulates second-order corrections.
+	
+	\paragraph{\code{simulate(self, theta\_np, T\_obs=200, seed=42)}.}
+	Returns \code{(Y, X)} where \code{Y} is the $(T, 2)$ observation matrix and \code{X} is the $(T, 2)$ state matrix.
+	Note: the simulation loop computes controls \emph{before} updating the state, so \code{Y[t]} corresponds to \code{X[t]}, not \code{X[t+1]}.
+	
+	\subsubsection{\code{EpsteinZinNKModel}}
+	
+	A 10-parameter model with recursive Epstein--Zin preferences.
+	Parameters: $(\beta, \gamma, \psi, \kappa, \phi_\pi, \phi_y, \rho_a, \rho_v, \sigma_a, \sigma_v)$.
+	At first order, only $\psi$ enters (via the IS curve, replacing $1/\sigma_c$ with $\psi$).
+	All second-order corrections scale with $\delta = \gamma - 1/\psi$.
+	Includes cross-state interaction terms and a risk premium correction in $g_{ss}$.
+	The simulation includes state clipping at $\pm 5\sigma$ to prevent divergence when $\delta$ is large.
+	
+	\subsection{Filter Classes}
+	\label{app:dsgeEZ_filters}
+	
+	All filters implement \code{log\_likelihood(self, model, data, theta)} returning a scalar log-likelihood.
+	They accept the model and theta separately (rather than a pre-computed solution) and call \code{model.solve(theta)} internally.
+	
+	\paragraph{\code{AugmentedKalmanFilter} (second-order linearisation).}
+	Builds an augmented state-space (\code{build\_augmented\_ssm} on the model) whose observation matrix $Z$ has $n_y$ rows.
+	The innovation covariance is $S = Z P Z^\top + R_{\mathrm{obs}}$; therefore $R_{\mathrm{obs}}$ must be $n_y \times n_y$.
+	If the model exposes \code{\_obs\_noise\_var} (a scalar variance), the filter replaces the augmented template's $R_{\mathrm{obs}}$ with \code{\_obs\_noise\_var * eye(ny)} where \code{ny = model.n\_observables()}, preventing accidental use of a template sized for a different model (e.g.\ $4 \times 4$ vs.\ $3 \times 3$).
+	Readers without a filtering background can think of this as: ``the measurement noise matrix must be the same shape as the predicted forecast error of the observations.''
+	
+	The \code{KalmanFilter} uses the Joseph form for the covariance update and Cholesky-based log-determinant computation.
+	The \code{SquareRootUKF} maintains the state covariance Cholesky factor directly, with QR-based prediction updates and general-dimension rank-1 Cholesky downdates for the measurement update.
+	The \code{PrunedSquareRootUKF} implements a pruned UKF that tracks $x^f$ as the UKF state and $x^s$ as a deterministic side variable, following the decomposition of Andreasen et~al.~\cite{andreasen2018pruning}; the UKF sigma-point propagation through the nonlinear observation (which includes the $\text{kron}(x^f, x^f)$ term) replaces the EKF linearisation used in earlier versions.
+	This works well for models with moderate $\|H_{xx}\|$ (e.g., SmallNK).
+	For the SGU model, where $\|H_{xx}\| \approx 604$ (see Section~\ref{sec:sgu_hxx}), first-order filtering is used instead (see Section~\ref{sec:pruned_ukf} for discussion).
+	
+	\subsection{Estimator Classes}
+	\label{app:dsgeEZ_estimators}
+	
+	\paragraph{\code{MAPEstimator}.}
+	Uses Adam with gradient clipping (norm 100) for robustness.
+	The loss and gradient are computed in a JIT-compiled function.
+	Tracks the best log-posterior seen across all steps.
+	
+	\paragraph{\code{HMCEstimator}.}
+	Single-chain HMC using TFP's \code{SimpleStepSizeAdaptation}.
+	Used for quick preliminary runs (e.g., Stage 1 of the tutorial).
+	
+	\paragraph{\code{MultiChainHMC}.}
+	Production-grade multi-chain HMC implementing the three-phase pipeline (Section~\ref{sec:three_phase}).
+	Returns a \code{MultiChainResult} dataclass containing per-chain samples, acceptance rates, step sizes, divergence counts, preconditioning scale, and timing information.
+	
+	\subsection{Diagnostic Functions}
+	\label{app:dsgeEZ_diag}
+	
+	\paragraph{\code{compute\_rhat(chains)}.}
+	Split-$\hat{R}$ with rank normalisation following \citet{vehtari2021rank}.
+	Splits each chain in half, rank-normalises to normal scores, then computes the standard $\hat{R}$ formula.
+	
+	\paragraph{\code{compute\_ess(chains)}.}
+	Bulk ESS (from rank-normalised draws) and tail ESS (from folded rank-normalised draws).
+	Uses the initial positive sequence estimator for autocorrelation.
+	
+	\paragraph{\code{mcmc\_summary(chains, param\_names, theta\_true)}.}
+	Prints a formatted table with posterior mean, std, quantiles, ESS, $\hat{R}$, and coverage for each parameter.
+	Flags parameters with $\hat{R} > 1.01$ or ESS $< 400$.
+	
+	
+	%======================================================================
+	\section{Detailed Documentation of \code{dsgeneural.py}}
+	\label{app:dsgeneural}
+	%======================================================================
+	
+	This appendix documents the neural solver file.
+	
+	\subsection{Network Architectures}
+	\label{app:architectures}
+	
+	\subsubsection{\code{ScalablePolicyNetwork}}
+	
+	The production architecture.
+	Auto-selects depth and width based on $d_{\mathrm{in}}$ (see Section~\ref{sec:nn_arch}).
+	Supports custom activations (\code{tanh}, \code{mrepu2}, \code{mrepu3}, \code{siren}) via the \code{\_resolve\_activation} dispatcher, spectral normalisation via \code{spectral\_norm=True}, and SIREN via delegation to \code{SIRENNetwork}.
+	For $d_{\mathrm{in}} \geq 60$, builds a \code{tf.keras.Model} with gated residual connections (skip every 2 layers when widths match).
+	
+	\subsubsection{\code{SIRENNetwork}}
+	
+	Multi-layer network with $\sin(\omega_0 z)$ activations and SIREN-specific initialisation.
+	The first layer uses $W \sim U(-1/d_{\mathrm{in}}, 1/d_{\mathrm{in}})$; subsequent layers use $W \sim U(-\sqrt{6/d_\ell}/\omega_0, \sqrt{6/d_\ell}/\omega_0)$.
+	
+	\subsection{Solver Classes}
+	\label{app:solvers}
+	
+	\subsubsection{\code{ConditionedNeuralNKSolver}}
+	
+	The main production class.
+	Key attributes: model dimensions (\code{N\_STATES=2}, \code{N\_PARAMS=9}, etc.), structural bounds (\code{\_BOUNDS\_LO}, \code{\_BOUNDS\_HI}), and state-to-parameter index mappings (\code{\_STATE\_RHO\_IDX}, \code{\_STATE\_SIG\_IDX}).
+	
+	\paragraph{\code{\_setup\_posterior}.}
+	When \code{reparam=True}: computes $M = V\Lambda^{1/2}$ from the eigendecomposition of the posterior covariance, stores $M$, $M^{-1}$, and $\theta_{\mathrm{mode}}$ as both NumPy arrays and TF constants.
+	Computes the training domain in $\psi$-space.
+	When \code{reparam=False}: uses an inflated box around the posterior in $\theta$-space.
+	
+	\paragraph{\code{\_sample\_theta}.}
+	When \code{reparam=True}: samples $\psi$ from the inflated posterior Gaussian via LHS, round-trips through $\theta$ for bound enforcement ($\psi \to \theta \to \mathrm{clip} \to \psi$).
+	When \code{reparam=False}: samples $\theta$ directly from the inflated posterior Gaussian.
+	
+	\paragraph{\code{pretrain}.}
+	Warm-starts the NN with supervised targets.
+	Uses dimension-dependent defaults from \code{pretrain\_defaults}.
+	When \code{reparam=True}, the pool of parameter vectors contains $\psi$ values; these are converted to structural $\theta$ for the perturbation solver.
+	Features: cosine LR decay, validation split with early stopping, curriculum learning (1st-order-only targets initially), periodic state-grid refresh, gradient clipping.
+	
+	\paragraph{\code{train\_sobolev}.}
+	Main AiO training loop with all regularisation options.
+	The \code{step\_sob} function uses nested \code{GradientTape}s: the outer tape computes $\partial\mathcal{L}/\partial\bpsi$ for the optimiser; the inner persistent tape computes $\partial R/\partial\btheta$ for Sobolev, $\partial\Pi/\partial\btheta$ for PG, and $\partial R/\partial\btheta$ for GC.
+	Supports DCGD mode (\code{dcgd=True}) via a separate \code{step\_dcgd} function.
+	
+	\paragraph{\code{solve(theta)}.}
+	External interface accepting structural $\theta$.
+	When \code{reparam=True}, converts $\theta \to \psi$ for NN evaluation and stores structural $\theta$ for the model solution.
+	Dispatches to \code{solve\_fd}, \code{solve\_autodiff}, or \code{solve\_regression}.
+	
+	\paragraph{\code{solve\_regression}.}
+	The default coefficient extraction method.
+	Stage 1: FD Jacobian (central differences, $2n_s$ probes).
+	Stage 2: Ridge-regression Hessian (random samples near origin, subtract known linear terms, regress quadratic).
+	All NN evaluations are fused into a single batched forward pass.
+	Fully JIT-safe.
+	
+	\paragraph{\code{migrate\_to\_cpu}.}
+	Rebuilds the NN on \code{/CPU:0} with weights copied from GPU.
+	Also migrates the residual balancing log-variance variable and all reparameterisation tensors.
+	Essential before HMC when training was done on GPU.
+	
+	
+	\subsubsection{\code{NeuralSGUSolver} (SGU small open economy, Hall--Hoffarth constraints)}
+	
+	This class targets the Schmitt-Groh\'{e}/Uribe small open economy model with parameter-conditioned neural policies.
+	\textbf{Idea in plain language:} instead of asking a neural network to output all eight control variables at once (consumption, hours, output, investment, etc.), the network only predicts two ``hard'' controls---consumption and investment---that appear directly in intertemporal Euler equations.
+	The other six controls are \emph{derived} each forward pass from static first-order conditions (labor supply, production, marginal utility, trade balance, current account) using the same algebra as the structural model.
+	This reduces the NN's job, shrinks the residual space used in All-in-One training to two equations (consumption Euler + capital first-order condition), and ties the learned policy tightly to economic accounting identities.
+	
+	\textbf{State and parameters:} seven states (\code{d, k, r, a, riskprem, zeta, mu}), three shocks, fifteen structural parameters (capital share, risk aversion, adjustment costs, persistence and variances of shocks, etc.); see \code{PARAM\_NAMES} in code.
+	
+	\textbf{Observation vector for likelihood:} \code{N\_OBSERVABLES = 3}, aligned with \code{SGUEstimable}: GDP, current account, and interest rate.
+	The returned \code{ModelSolution} uses $R_{\mathrm{obs}} = 10^{-3} I_3$ by default (diagonal measurement noise); this dimension must match the filter (Section~\ref{sec:pitfall_akf_r}).
+	
+	\textbf{\code{\_build\_model\_solution}:} runs the XLA/perturbation solver on \code{SGUSmallOpen} to obtain a consistent $h_x$, $\eta$, and full $g_x$, then overwrites the rows of $g_x$ corresponding to the NN outputs (\code{c}, \code{i}) with values extracted from the network's Jacobian at the origin.
+	Second-order matrices \code{G\_xx}, \code{H\_xx}, \code{g\_ss}, \code{h\_ss} are set to zero in this hybrid construction: the intent is estimation with first-order filtering (standard for large $\|H_{xx}\|$ in SGU), not pruned second-order UKF on the neural path.
+	
+	\subsubsection{\code{NeuralSGUSolverNaive}}
+	
+	Baseline solver where the network outputs all eight controls and training can target a larger residual system.
+	Uses the same three observables and $R_{\mathrm{obs}}$ sizing as \code{NeuralSGUSolver} for fair comparison when evaluating likelihoods.
+	For methodological discussion of why the constrained \code{NeuralSGUSolver} is preferred, see the Hall--Hoffarth literature and Section~\ref{sec:pitfalls} (shape contracts).
+	
+	
+	%======================================================================
+	\section{Detailed Documentation of \code{tutorial\_neural\_dsge.py}}
+	\label{app:tutorial}
+	%======================================================================
+	
+	The tutorial runs three complete estimation pipelines sequentially.
+	
+	\subsection{Overall Structure}
+	
+	The tutorial defines a \code{NeuralSmallNKModel} wrapper class that inherits from \code{SmallNKModel} and delegates \code{solve()} to a trained \code{ConditionedNeuralNKSolver}.
+	The \code{run\_map\_hmc} helper function runs MAP optimisation followed by multi-chain HMC for each case.
+	
+	\subsection{Case C: Neural Estimation (Three Stages)}
+	
+	\paragraph{Stage 1: Quick perturbation posterior.}
+	A short single-chain HMC (\code{HMCEstimator}, 200 draws + 100 burnin) using the perturbation model and UKF generates theta-samples for the neural solver's training domain.
+	
+	\paragraph{Stage 2: Train reparameterised neural solver.}
+	Creates a \code{ConditionedNeuralNKSolver} with \code{hidden=(128, 128)} and the theta-samples from Stage 1.
+	Pretrains from a \code{SmallNKModel(nl\_scale=NL\_SCALE)} perturbation model, then runs AiO + Sobolev + PG training (\code{train\_sobolev}).
+	The default \code{reparam=True} trains in $\psi$-space.
+	
+	\paragraph{Stage 3: Full multi-chain HMC.}
+	Wraps the trained solver in \code{NeuralSmallNKModel}, pairs it with the UKF, and runs \code{MultiChainHMC} with the same settings as Cases A and B.
+	
+	\warn{Case C uses \code{seed=99} for data generation (different from Cases A and B which use \code{seed=42}) to avoid look-ahead bias: the neural solver is trained on theta-samples from the perturbation posterior, not from the same data it will be evaluated on.}
+	
+	
+	\bibliographystyle{apalike}
+	\begin{thebibliography}{15}
+		
+		\bibitem[Calvo, 1983]{calvo1983staggered}
+		Calvo, G.~A. (1983).
+		Staggered prices in a utility-maximizing framework.
+		\emph{Journal of Monetary Economics}, 12(3):383--398.
+		
+		\bibitem[Chen et~al., 2018]{chen2018gradnorm}
+		Chen, Z., Badrinarayanan, V., Lee, C.-Y., and Rabinovich, A. (2018).
+		GradNorm: Gradient normalisation for adaptive loss balancing in deep multitask networks.
+		In \emph{ICML}, pp.~794--803.
+		
+		\bibitem[Gal{\'i}, 2015]{gali2015monetary}
+		Gal{\'i}, J. (2015).
+		\emph{Monetary Policy, Inflation, and the Business Cycle}.
+		Princeton University Press, 2nd edition.
+		
+		\bibitem[Hoffman and Gelman, 2014]{hoffman2014}
+		Hoffman, M.~D. and Gelman, A. (2014).
+		The No-U-Turn sampler: Adaptively setting path lengths in Hamiltonian Monte Carlo.
+		\emph{JMLR}, 15:1593--1623.
+		
+		\bibitem[Hutchinson, 1990]{hutchinson1990}
+		Hutchinson, M.~F. (1990).
+		A stochastic estimator of the trace of the influence matrix for Laplacian smoothing splines.
+		\emph{Communications in Statistics---Simulation and Computation}, 19(2):433--450.
+		
+		\bibitem[Kendall et~al., 2018]{kendall2018}
+		Kendall, A., Gal, Y., and Cipolla, R. (2018).
+		Multi-task learning using uncertainty to weigh losses.
+		In \emph{CVPR}, pp.~7482--7491.
+		
+		\bibitem[Kingma and Ba, 2015]{kingma2015adam}
+		Kingma, D.~P. and Ba, J. (2015).
+		Adam: A method for stochastic optimization.
+		In \emph{ICLR}.
+		
+		\bibitem[Maliar et~al., 2021]{maliar2021deep}
+		Maliar, L., Maliar, S., and Winant, P. (2021).
+		Deep learning for solving dynamic economic models.
+		\emph{Journal of Monetary Economics}, 122:76--101.
+		
+		\bibitem[Miyato et~al., 2018]{miyato2018spectral}
+		Miyato, T., Kataoka, T., Koyama, M., and Yoshida, Y. (2018).
+		Spectral normalisation for generative adversarial networks.
+		In \emph{ICLR}.
+		
+		\bibitem[Neal, 2011]{neal2011}
+		Neal, R.~M. (2011).
+		MCMC using Hamiltonian dynamics.
+		In \emph{Handbook of MCMC}, chapter~5. CRC.
+		
+		\bibitem[Nesterov, 2009]{nesterov2009primal}
+		Nesterov, Y. (2009).
+		Primal-dual subgradient methods for convex problems.
+		\emph{Mathematical Programming}, 120(1):221--259.
+		
+		\bibitem[Sitzmann et~al., 2020]{sitzmann2020siren}
+		Sitzmann, V., Martel, J.~N.~P., Bergman, A.~W., Lindell, D.~B., and Wetzstein, G. (2020).
+		Implicit neural representations with periodic activation functions.
+		In \emph{NeurIPS}, pp.~7462--7473.
+		
+		\bibitem[Taylor, 1993]{taylor1993}
+		Taylor, J.~B. (1993).
+		Discretion versus policy rules in practice.
+		\emph{Carnegie-Rochester Conference Series}, 39:195--214.
+		
+		\bibitem[Vehtari et~al., 2021]{vehtari2021rank}
+		Vehtari, A., Gelman, A., Simpson, D., Carpenter, B., and B{\"u}rkner, P.-C. (2021).
+		Rank-normalization, folding, and localization: An improved $\hat{R}$.
+		\emph{Bayesian Analysis}, 16(2):667--718.
+		
+		\bibitem[Yu et~al., 2020]{dcgd_ref}
+		Yu, T., Kumar, S., Gupta, A., Levine, S., Hausman, K., and Finn, C. (2020).
+		Gradient surgery for multi-task learning.
+		In \emph{NeurIPS}, pp.~5824--5836.
+		
+		\bibitem[Andreasen et~al., 2018]{andreasen2018pruning}
+		Andreasen, M.~M., Fern\'{a}ndez-Villaverde, J., and Rubio-Ram\'{i}rez, J.~F. (2018).
+		The pruned state-space system for non-linear DSGE models: Theory and empirical applications.
+		\emph{Review of Economic Studies}, 85(1):1--49.
+		
+		\bibitem[Kim et~al., 2008]{kim2008calculating}
+		Kim, J., Kim, S., Schaumburg, E., and Sims, C.~A. (2008).
+		Calculating and using second-order accurate solutions of discrete time dynamic equilibrium models.
+		\emph{Journal of Economic Dynamics and Control}, 32(11):3397--3414.
+		
+		\bibitem[Gill et~al., 1974]{gill1974methods}
+		Gill, P.~E., Golub, G.~H., Murray, W., and Saunders, M.~A. (1974).
+		Methods for modifying matrix factorizations.
+		\emph{Mathematics of Computation}, 28(126):505--535.
+		
+		\bibitem[Van der Merwe and Wan, 2001]{vandermerwe2001}
+		Van~der~Merwe, R. and Wan, E.~A. (2001).
+		The square-root unscented Kalman filter for state and parameter-estimation.
+		In \emph{IEEE International Conference on Acoustics, Speech, and Signal Processing (ICASSP)}, pp.~3461--3464.
+		
+		\bibitem[Fern{\'a}ndez-Villaverde and Rubio-Ram{\'i}rez, 2007]{fernandezvillaverde2007estimating}
+		Fern{\'a}ndez-Villaverde, J. and Rubio-Ram{\'i}rez, J.~F. (2007).
+		Estimating macroeconomic models: A likelihood approach.
+		\emph{Review of Economic Studies}, 74(4):1059--1087.
+
+		\bibitem[Schmitt-Groh{\'e} and Uribe, 2003]{sgu2003}
+		Schmitt-Groh{\'e}, S. and Uribe, M. (2003).
+		Closing small open economy models.
+		\emph{Journal of International Economics}, 61(1):163--185.
+
+		\bibitem[Schmitt-Groh{\'e} and Uribe, 2004]{sgu2004}
+		Schmitt-Groh{\'e}, S. and Uribe, M. (2004).
+		Solving dynamic general equilibrium models using a second-order approximation to the policy function.
+		\emph{Journal of Economic Dynamics and Control}, 28(4):755--775.
+
+		\bibitem[Childers et~al., 2024]{childers2024}
+		Childers, D., Fern{\'a}ndez-Villaverde, J., Perla, J., Rackauckas, C., and Wu, P. (2024).
+		Differentiable state-space models and Hamiltonian Monte Carlo estimation.
+		Working paper, available at \url{https://github.com/HighDimensionalEconLab/HMCExamples.jl}.
+		
+	\end{thebibliography}
+	
+\end{document}
